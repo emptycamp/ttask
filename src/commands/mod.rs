@@ -1,4 +1,5 @@
 pub mod add;
+pub mod clear;
 pub mod complete;
 pub mod delete;
 pub mod edit;
@@ -73,6 +74,16 @@ pub fn dispatch(
         Some(Cmd::Info { id }) => {
             let output = info::run(*id, store, &opts)?;
             print!("{output}");
+        }
+        Some(Cmd::Clear { yes }) => {
+            let stats = clear::run(*yes, store, prompt)?;
+            println!(
+                "Cleared {} task{} and {} history event{}.",
+                stats.tasks_cleared,
+                if stats.tasks_cleared == 1 { "" } else { "s" },
+                stats.events_cleared,
+                if stats.events_cleared == 1 { "" } else { "s" },
+            );
         }
         Some(Cmd::History { list, revert, yes }) => match revert {
             Some(id) => {

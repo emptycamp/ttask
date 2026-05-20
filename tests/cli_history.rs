@@ -203,7 +203,9 @@ fn history_revert_accepts_force_long_alias() {
 }
 
 #[test]
-fn history_revert_oldest_cascades_to_all_newer() {
+fn history_revert_independent_tasks_do_not_cascade() {
+    // Three unrelated adds. Reverting the oldest should only undo that one task —
+    // separate tasks aren't connected.
     let scope = StoreScope::new();
     task(&scope).args(["add", "first"]).assert().success();
     task(&scope).args(["add", "second"]).assert().success();
@@ -211,7 +213,6 @@ fn history_revert_oldest_cascades_to_all_newer() {
 
     let output = task(&scope).args(["history", "--list"]).output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // The smallest history id is the oldest event.
     let oldest_id = stdout
         .lines()
         .filter_map(|line| line.trim_start().split_whitespace().next()?.parse::<u64>().ok())
@@ -222,14 +223,49 @@ fn history_revert_oldest_cascades_to_all_newer() {
         .args(["history", "--revert", &oldest_id.to_string(), "-y"])
         .assert()
         .success()
-        .stdout(contains("Reverted 3 events"));
+        .stdout(contains("Reverted event"));
 
-    // All three tasks should be gone.
+    // Only the first task is gone; second and third survive.
     task(&scope)
         .args(["list"])
         .assert()
         .success()
-        .stdout(contains("No tasks"));
+        .stdout(contains("second"))
+        .stdout(contains("third"))
+        .stdout(predicates::str::contains("first").not());
+}
+
+#[test]
+fn history_revert_cascades_through_same_task_only() {
+    // Task #1 gets added, edited, completed. Task #2 just gets added.
+    // Reverting the add-of-task-#1 cascades through task #1's three events,
+    // but leaves task #2 alone.
+    let scope = StoreScope::new();
+    task(&scope).args(["add", "first"]).assert().success(); // event #1: Added id=1
+    task(&scope).args(["add", "second"]).assert().success(); // event #2: Added id=2
+    task(&scope)
+        .args(["edit", "1", "renamed"])
+        .assert()
+        .success(); // event #3: Edited id=1
+    task(&scope).args(["complete", "1"]).assert().success(); // event #4: Completed id=1
+
+    task(&scope)
+        .args(["history", "--revert", "1", "-y"])
+        .assert()
+        .success()
+        .stdout(contains("Reverted 3 events"));
+
+    // Task #2 untouched.
+    task(&scope)
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(contains("second"));
+    // Task #1 gone (the cascade removed all three of its events).
+    task(&scope)
+        .args(["info", "1"])
+        .assert()
+        .failure();
 }
 
 #[test]

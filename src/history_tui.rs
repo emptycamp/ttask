@@ -2,13 +2,17 @@
 //!
 //! Behaves like `task` view's pending-change model:
 //! - `u` or Enter toggles a "mark for undo" anchor on the selected event.
-//! - Marking an event also marks every newer event (the cascade) — they're shown
-//!   struck-through in red so the user sees exactly what's about to happen.
-//! - Esc / Ctrl+C exits and applies all marks (newest first). `q` does nothing,
-//!   matching `task` view's keymap.
+//! - Marks live per-task: anchoring on a task #1 event marks task #1's cascade; you
+//!   can independently anchor on a task #2 event to add task #2's cascade. Marking
+//!   never reaches across tasks (separate tasks aren't connected).
+//! - Within each task, marking an event also marks every newer event on the same
+//!   task. The marked events are shown struck-through in red.
+//! - Esc / Ctrl+C exits and applies all marks (newest first across the union).
+//!   `q` does nothing, matching `task` view's keymap.
 
 use crate::error::{Error, Result};
 use crate::format::format_relative_past;
+use crate::model::TaskId;
 use crate::store::revert::HistoryEntry;
 use crate::store::Store;
 use chrono::Utc;
@@ -23,15 +27,16 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::{Frame, Terminal};
+use std::collections::HashMap;
 use std::io;
 
 pub struct App {
     /// Events sorted newest-first.
     pub entries: Vec<(u64, HistoryEntry)>,
     pub cursor: usize,
-    /// The oldest event marked for undo. Everything with id >= anchor is also marked
-    /// (the cascade). `None` means nothing is marked.
-    pub anchor: Option<u64>,
+    /// One anchor per task — the oldest event on that task that's marked for undo.
+    /// Each anchor implies "this event and every newer event on the same task".
+    pub anchors: HashMap<TaskId, u64>,
     pub error: Option<String>,
 }
 
@@ -40,44 +45,68 @@ impl App {
         Self {
             entries,
             cursor: 0,
-            anchor: None,
+            anchors: HashMap::new(),
             error: None,
         }
     }
 
-    pub fn is_marked(&self, id: u64) -> bool {
-        self.anchor.map(|a| id >= a).unwrap_or(false)
+    /// Task id of an arbitrary event id, by looking it up in entries.
+    fn task_of(&self, event_id: u64) -> Option<TaskId> {
+        self.entries
+            .iter()
+            .find(|(id, _)| *id == event_id)
+            .map(|(_, e)| e.op.task_id())
     }
 
-    /// Toggle the mark anchor at the cursor's event. Pressing on the current anchor
-    /// clears all marks; pressing anywhere else moves the anchor (which may extend or
-    /// narrow the cascade depending on where the user is).
+    pub fn is_marked(&self, event_id: u64) -> bool {
+        let Some(task_id) = self.task_of(event_id) else {
+            return false;
+        };
+        let Some(&anchor) = self.anchors.get(&task_id) else {
+            return false;
+        };
+        event_id >= anchor
+    }
+
+    /// Toggle the mark anchor at the cursor's event. Affects only the event's task —
+    /// other tasks' anchors are left alone. Pressing on a task's current anchor
+    /// clears that task's marks; pressing on any other event sets/moves that task's
+    /// anchor.
     pub fn toggle_mark_at_cursor(&mut self) {
-        let Some((id, _)) = self.entries.get(self.cursor) else {
+        let Some((event_id, entry)) = self.entries.get(self.cursor) else {
             return;
         };
-        let id = *id;
-        if self.anchor == Some(id) {
-            self.anchor = None;
-        } else {
-            self.anchor = Some(id);
+        let event_id = *event_id;
+        let task_id = entry.op.task_id();
+
+        match self.anchors.get(&task_id).copied() {
+            Some(existing) if existing == event_id => {
+                self.anchors.remove(&task_id);
+            }
+            _ => {
+                self.anchors.insert(task_id, event_id);
+            }
         }
         self.error = None;
     }
 
-    /// Return ids to revert in apply order (newest first). Empty if nothing is marked.
+    /// Return ids to revert in apply order (newest first across all tasks). Each
+    /// per-task cascade is independent, so global newest-first ordering is safe:
+    /// reverting an event on task A doesn't affect task B's state.
     pub fn cascade_ids(&self) -> Vec<u64> {
-        let Some(anchor) = self.anchor else {
-            return Vec::new();
-        };
         let mut ids: Vec<u64> = self
             .entries
             .iter()
+            .filter(|(id, _)| self.is_marked(*id))
             .map(|(id, _)| *id)
-            .filter(|id| *id >= anchor)
             .collect();
         ids.sort_by(|a, b| b.cmp(a));
         ids
+    }
+
+    /// Number of distinct tasks currently anchored.
+    pub fn marked_task_count(&self) -> usize {
+        self.anchors.len()
     }
 }
 
@@ -216,12 +245,19 @@ fn draw(frame: &mut Frame, app: &App) {
             format!(" ! {err}"),
             Style::default().fg(Color::Red),
         ))
-    } else if let Some(anchor) = app.anchor {
+    } else if !app.anchors.is_empty() {
         let count = app.cascade_ids().len();
-        let msg = if count == 1 {
-            format!(" 1 event marked (#{anchor})")
+        let task_count = app.marked_task_count();
+        let msg = if task_count == 1 {
+            // Sole anchor — name the task to make the scope concrete.
+            let (task_id, anchor) = app.anchors.iter().next().unwrap();
+            if count == 1 {
+                format!(" 1 event marked (#{anchor}) on task #{task_id}")
+            } else {
+                format!(" {count} events marked on task #{task_id} — cascade from #{anchor}")
+            }
         } else {
-            format!(" {count} events marked — cascades from #{anchor} forward")
+            format!(" {count} events marked across {task_count} tasks")
         };
         Line::from(Span::styled(msg, Style::default().fg(Color::Yellow)))
     } else {
@@ -242,15 +278,39 @@ mod tests {
     use crate::store::revert::RevertOp;
     use chrono::Utc;
 
-    fn entries(ids: &[u64]) -> Vec<(u64, HistoryEntry)> {
+    /// Build N events that all touch the same task — that's what the cascade is
+    /// scoped to, so this is the relevant shape for the navigation tests.
+    fn same_task_entries(event_ids: &[u64], task_id: u32) -> Vec<(u64, HistoryEntry)> {
+        use crate::model::{Priority, Status, Task};
         let now = Utc::now();
-        ids.iter()
+        let baseline = Task {
+            id: task_id,
+            text: format!("task {task_id}"),
+            priority: Priority::B,
+            due: now,
+            est_secs: 0,
+            status: Status::Active,
+            created_at: now,
+            completed_at: None,
+            deleted_at: None,
+        };
+        event_ids
+            .iter()
             .rev() // newest first
-            .map(|id| {
+            .enumerate()
+            .map(|(i, id)| {
+                let op = if i == event_ids.len() - 1 {
+                    // The oldest entry is the original add.
+                    RevertOp::Added { id: task_id }
+                } else {
+                    RevertOp::Edited {
+                        before: baseline.clone(),
+                    }
+                };
                 (
                     *id,
                     HistoryEntry {
-                        op: RevertOp::Added { id: *id as u32 },
+                        op,
                         timestamp: now,
                     },
                 )
@@ -260,24 +320,23 @@ mod tests {
 
     #[test]
     fn empty_cascade_when_no_anchor() {
-        let app = App::from_entries(entries(&[1, 2, 3]));
+        let app = App::from_entries(same_task_entries(&[1, 2, 3], 1));
         assert!(app.cascade_ids().is_empty());
     }
 
     #[test]
     fn marking_cursor_event_sets_anchor() {
-        let mut app = App::from_entries(entries(&[1, 2, 3]));
+        let mut app = App::from_entries(same_task_entries(&[1, 2, 3], 1));
         // Newest-first: entries[0] = (3, ...), entries[1] = (2, ...), entries[2] = (1, ...).
         app.cursor = 1; // event id 2
         app.toggle_mark_at_cursor();
-        assert_eq!(app.anchor, Some(2));
+        assert_eq!(app.anchors.get(&1), Some(&2));
     }
 
     #[test]
-    fn cascade_includes_target_and_all_newer() {
-        let mut app = App::from_entries(entries(&[1, 2, 3, 4, 5]));
+    fn cascade_includes_target_and_all_newer_within_same_task() {
+        let mut app = App::from_entries(same_task_entries(&[1, 2, 3, 4, 5], 1));
         // Move cursor to event id 3 (the middle).
-        // Newest-first order means (5,4,3,2,1), so cursor 2 = id 3.
         app.cursor = 2;
         app.toggle_mark_at_cursor();
         let cascade = app.cascade_ids();
@@ -285,8 +344,8 @@ mod tests {
     }
 
     #[test]
-    fn marking_older_extends_cascade() {
-        let mut app = App::from_entries(entries(&[1, 2, 3]));
+    fn marking_older_extends_cascade_within_same_task() {
+        let mut app = App::from_entries(same_task_entries(&[1, 2, 3], 1));
         app.cursor = 0; // id 3
         app.toggle_mark_at_cursor();
         assert_eq!(app.cascade_ids(), vec![3]);
@@ -298,22 +357,113 @@ mod tests {
 
     #[test]
     fn pressing_on_current_anchor_clears_marks() {
-        let mut app = App::from_entries(entries(&[1, 2, 3]));
+        let mut app = App::from_entries(same_task_entries(&[1, 2, 3], 1));
         app.cursor = 1; // id 2
         app.toggle_mark_at_cursor();
-        assert_eq!(app.anchor, Some(2));
+        assert_eq!(app.anchors.get(&1), Some(&2));
         app.toggle_mark_at_cursor();
-        assert_eq!(app.anchor, None);
+        assert!(app.anchors.is_empty());
         assert!(app.cascade_ids().is_empty());
     }
 
     #[test]
     fn is_marked_checks_cascade_membership() {
-        let mut app = App::from_entries(entries(&[1, 2, 3]));
+        let mut app = App::from_entries(same_task_entries(&[1, 2, 3], 1));
         app.cursor = 1; // id 2
         app.toggle_mark_at_cursor();
         assert!(app.is_marked(3));
         assert!(app.is_marked(2));
         assert!(!app.is_marked(1));
+    }
+
+    /// Multiple anchors: a user can mark events from several tasks and the per-task
+    /// cascades all show up together.
+    #[test]
+    fn anchors_on_two_tasks_union_their_cascades() {
+        use crate::model::{Priority, Status, Task};
+        let now = Utc::now();
+        fn t(id: u32) -> Task {
+            Task {
+                id,
+                text: format!("task {id}"),
+                priority: Priority::B,
+                due: Utc::now(),
+                est_secs: 0,
+                status: Status::Active,
+                created_at: Utc::now(),
+                completed_at: None,
+                deleted_at: None,
+            }
+        }
+        // Newest-first history:
+        //   5 → edited #2
+        //   4 → edited #1
+        //   3 → added #2
+        //   2 → edited #1
+        //   1 → added #1
+        let entries = vec![
+            (5, HistoryEntry { op: RevertOp::Edited { before: t(2) }, timestamp: now }),
+            (4, HistoryEntry { op: RevertOp::Edited { before: t(1) }, timestamp: now }),
+            (3, HistoryEntry { op: RevertOp::Added { id: 2 }, timestamp: now }),
+            (2, HistoryEntry { op: RevertOp::Edited { before: t(1) }, timestamp: now }),
+            (1, HistoryEntry { op: RevertOp::Added { id: 1 }, timestamp: now }),
+        ];
+        let mut app = App::from_entries(entries);
+
+        // Anchor on event 1 (task #1 added) — that drags in events 2 & 4 (task #1's
+        // edits) but not events 3 & 5 (task #2).
+        app.cursor = 4; // event id 1
+        app.toggle_mark_at_cursor();
+        assert_eq!(app.cascade_ids(), vec![4, 2, 1]);
+
+        // Anchor on event 3 (task #2 added) — now task #2's cascade joins.
+        app.cursor = 2; // event id 3
+        app.toggle_mark_at_cursor();
+        assert_eq!(app.marked_task_count(), 2);
+        assert_eq!(app.cascade_ids(), vec![5, 4, 3, 2, 1]);
+
+        // Clear task #1's anchor by toggling it again; task #2 remains anchored.
+        app.cursor = 4;
+        app.toggle_mark_at_cursor();
+        assert_eq!(app.marked_task_count(), 1);
+        assert_eq!(app.cascade_ids(), vec![5, 3]);
+    }
+
+    /// Mixed-task entries: anchoring on a #task-A event must NOT mark newer #task-B events.
+    #[test]
+    fn cascade_skips_events_for_other_tasks() {
+        use crate::model::{Priority, Status, Task};
+        let now = Utc::now();
+        fn t(id: u32) -> Task {
+            Task {
+                id,
+                text: format!("task {id}"),
+                priority: Priority::B,
+                due: Utc::now(),
+                est_secs: 0,
+                status: Status::Active,
+                created_at: Utc::now(),
+                completed_at: None,
+                deleted_at: None,
+            }
+        }
+        // History (newest-first): event 4 edits task #1, event 3 adds task #2,
+        // event 2 edits task #1, event 1 adds task #1.
+        let entries = vec![
+            (4, HistoryEntry { op: RevertOp::Edited { before: t(1) }, timestamp: now }),
+            (3, HistoryEntry { op: RevertOp::Added { id: 2 }, timestamp: now }),
+            (2, HistoryEntry { op: RevertOp::Edited { before: t(1) }, timestamp: now }),
+            (1, HistoryEntry { op: RevertOp::Added { id: 1 }, timestamp: now }),
+        ];
+        let mut app = App::from_entries(entries);
+        // Anchor on event 1 (add task #1).
+        app.cursor = 3;
+        app.toggle_mark_at_cursor();
+        // Cascade should contain task #1's events (4, 2, 1), skipping event 3 (#2).
+        assert_eq!(app.cascade_ids(), vec![4, 2, 1]);
+        assert!(app.is_marked(4));
+        assert!(app.is_marked(2));
+        assert!(app.is_marked(1));
+        assert!(!app.is_marked(3), "task #2 event should not be in the cascade");
     }
 }

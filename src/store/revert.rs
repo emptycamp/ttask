@@ -28,6 +28,18 @@ impl RevertOp {
             RevertOp::Completed { before } => format!("completed #{} ({})", before.id, truncate(&before.text, 30)),
         }
     }
+
+    /// The task this operation affected. The cascade uses this so reverting an older
+    /// event only pulls in newer events that touch the *same* task — separate tasks
+    /// don't share history.
+    pub fn task_id(&self) -> TaskId {
+        match self {
+            RevertOp::Added { id } => *id,
+            RevertOp::Edited { before } => before.id,
+            RevertOp::Deleted { before } => before.id,
+            RevertOp::Completed { before } => before.id,
+        }
+    }
 }
 
 fn truncate(s: &str, width: usize) -> String {

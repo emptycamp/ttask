@@ -39,16 +39,26 @@ pub fn revert(
     Ok(summaries)
 }
 
-/// Collect every history entry with `id >= from_id`, newest-first. Returns an error
-/// if the target id doesn't exist.
+/// Collect the cascade for `from_id`: the target event plus every newer event that
+/// touches the *same task*. Newest-first. Returns an error if the target id doesn't
+/// exist.
+///
+/// Tasks are independent — an edit to task #2 doesn't depend on an unrelated add of
+/// task #5, so reverting the add shouldn't drag the edit along.
 pub fn collect_cascade(store: &Store, from_id: u64) -> Result<Vec<(u64, HistoryEntry)>> {
-    let mut entries = store.history()?;
-    if !entries.iter().any(|(id, _)| *id == from_id) {
-        return Err(Error::HistoryNotFound(from_id));
-    }
-    entries.retain(|(id, _)| *id >= from_id);
-    entries.sort_by(|a, b| b.0.cmp(&a.0));
-    Ok(entries)
+    let entries = store.history()?;
+    let target_task_id = entries
+        .iter()
+        .find(|(id, _)| *id == from_id)
+        .map(|(_, e)| e.op.task_id())
+        .ok_or(Error::HistoryNotFound(from_id))?;
+
+    let mut filtered: Vec<(u64, HistoryEntry)> = entries
+        .into_iter()
+        .filter(|(id, e)| *id >= from_id && e.op.task_id() == target_task_id)
+        .collect();
+    filtered.sort_by(|a, b| b.0.cmp(&a.0));
+    Ok(filtered)
 }
 
 fn confirm_message(cascade: &[(u64, HistoryEntry)]) -> String {
@@ -56,9 +66,14 @@ fn confirm_message(cascade: &[(u64, HistoryEntry)]) -> String {
         let (id, e) = &cascade[0];
         return format!("Revert event #{id} ({})?", e.op.summary());
     }
+    // All entries in the cascade share the same task id by construction.
+    let task_id = cascade
+        .first()
+        .map(|(_, e)| e.op.task_id())
+        .unwrap_or(0);
     let mut msg = format!(
-        "Reverting an older event also rolls back every newer event.\n\
-         This will revert {} events (newest first):\n",
+        "Reverting an older event rolls back every newer event on the same task.\n\
+         This will revert {} events on task #{task_id} (newest first):\n",
         cascade.len()
     );
     for (id, e) in cascade {
@@ -123,7 +138,9 @@ mod tests {
     }
 
     #[test]
-    fn revert_older_event_cascades_to_all_newer_events() {
+    fn revert_cascade_only_includes_same_task_events() {
+        // Three independent tasks — reverting the oldest event should NOT pull in
+        // the newer events on different tasks.
         let dir = tempdir().unwrap();
         let mut store = Store::open(dir.path()).unwrap();
         let clock = make_clock();
@@ -135,33 +152,51 @@ mod tests {
         let oldest_id = entries.iter().map(|(id, _)| *id).min().unwrap();
 
         let result = revert(oldest_id, true, &mut store, &AutoConfirm).unwrap();
-        assert_eq!(result.len(), 3, "expected the full cascade to revert");
-        // All three tasks gone, history empty
+        assert_eq!(result.len(), 1, "cascade should be scoped to the target task");
         assert!(store.get_task(1).is_err());
-        assert!(store.get_task(2).is_err());
-        assert!(store.get_task(3).is_err());
-        assert!(store.history().unwrap().is_empty());
+        // Tasks #2 and #3 untouched — they're independent.
+        assert!(store.get_task(2).is_ok());
+        assert!(store.get_task(3).is_ok());
     }
 
     #[test]
-    fn revert_middle_event_cascades_to_newer_but_not_older() {
+    fn revert_older_event_cascades_through_same_task_only() {
+        // Task #1 gets added, edited, completed. Task #2 just gets added. Reverting
+        // the add-of-#1 cascades through #1's full history but skips #2.
         let dir = tempdir().unwrap();
         let mut store = Store::open(dir.path()).unwrap();
         let clock = make_clock();
-        store.add_task_with_revert(make_task(1), &clock).unwrap();
-        store.add_task_with_revert(make_task(2), &clock).unwrap();
-        store.add_task_with_revert(make_task(3), &clock).unwrap();
 
-        let mut entries = store.history().unwrap();
-        entries.sort_by_key(|(id, _)| *id);
-        let middle_id = entries[1].0;
+        let t1 = make_task(1);
+        store.add_task_with_revert(t1.clone(), &clock).unwrap();
+        let t2 = make_task(2);
+        store.add_task_with_revert(t2.clone(), &clock).unwrap();
+        // Edit task #1
+        let mut t1_edited = t1.clone();
+        t1_edited.text = "renamed".into();
+        store
+            .update_task_with_revert(t1.clone(), t1_edited.clone(), &clock)
+            .unwrap();
+        // Complete task #1
+        let mut t1_done = t1_edited.clone();
+        t1_done.status = crate::model::Status::Completed;
+        store
+            .complete_task_with_revert(t1_edited.clone(), t1_done, &clock)
+            .unwrap();
 
-        let result = revert(middle_id, true, &mut store, &AutoConfirm).unwrap();
-        assert_eq!(result.len(), 2, "expected middle + newest to be reverted");
-        // Oldest task survives, middle and newer are gone.
-        assert!(store.get_task(1).is_ok());
-        assert!(store.get_task(2).is_err());
-        assert!(store.get_task(3).is_err());
+        let entries = store.history().unwrap();
+        // Find the add-of-#1 event.
+        let target_id = entries
+            .iter()
+            .find(|(_, e)| matches!(e.op, crate::store::revert::RevertOp::Added { id: 1 }))
+            .map(|(id, _)| *id)
+            .expect("add-of-#1 event should exist");
+
+        let result = revert(target_id, true, &mut store, &AutoConfirm).unwrap();
+        // Cascade: complete-#1, edit-#1, add-#1 (3 events on task #1). Add-#2 untouched.
+        assert_eq!(result.len(), 3);
+        assert!(store.get_task(1).is_err(), "task #1 should be fully gone");
+        assert!(store.get_task(2).is_ok(), "task #2 was never part of the cascade");
     }
 
     #[test]
@@ -176,20 +211,21 @@ mod tests {
     }
 
     #[test]
-    fn confirm_message_cascade_lists_every_event() {
+    fn confirm_message_cascade_lists_every_event_and_names_task() {
+        // All entries share task #1 — the cascade scope.
         let now = Utc::now();
         let entries = vec![
             (
                 9,
                 HistoryEntry {
-                    op: crate::store::revert::RevertOp::Added { id: 3 },
+                    op: crate::store::revert::RevertOp::Completed { before: make_task(1) },
                     timestamp: now,
                 },
             ),
             (
                 8,
                 HistoryEntry {
-                    op: crate::store::revert::RevertOp::Added { id: 2 },
+                    op: crate::store::revert::RevertOp::Edited { before: make_task(1) },
                     timestamp: now,
                 },
             ),
@@ -206,6 +242,7 @@ mod tests {
         assert!(msg.contains("#9"));
         assert!(msg.contains("#8"));
         assert!(msg.contains("#7"));
-        assert!(msg.contains("older event"));
+        assert!(msg.contains("same task"));
+        assert!(msg.contains("task #1"));
     }
 }
