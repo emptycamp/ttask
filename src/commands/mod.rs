@@ -51,7 +51,11 @@ pub fn dispatch(
         }
         Some(Cmd::Add { args }) => {
             let task = add::run(args, store, clock)?;
-            println!("Added task #{}: {}", task.id, task.text);
+            println!(
+                "Added task #{}: {}",
+                task.id,
+                crate::format::sanitize_for_terminal(&task.text),
+            );
         }
         Some(Cmd::List { active, completed, deleted, all }) => {
             let choice = list::resolve_filter(*active, *completed, *deleted, *all);

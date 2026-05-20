@@ -1,9 +1,9 @@
 use crate::clock::Clock;
 use crate::editor::TaskEditor;
 use crate::error::{Error, Result};
-use crate::model::TaskId;
-use crate::store::Store;
-use crate::time::{parse_due, parse_duration};
+use crate::model::{Status, TaskId};
+use crate::store::{MutateKind, Store};
+use crate::time::parse_fields::{parse_task_fields, ParsedFields};
 use chrono::Local;
 
 pub fn run(
@@ -13,8 +13,6 @@ pub fn run(
     clock: &dyn Clock,
     editor: &dyn TaskEditor,
 ) -> Result<()> {
-    let task = store.get_task(id)?;
-
     if args.is_empty() {
         return run_form(id, store, clock, editor);
     }
@@ -22,32 +20,36 @@ pub fn run(
     let now_utc = clock.now();
     let now_local: chrono::DateTime<Local> = now_utc.into();
 
-    let mut updated = task.clone();
-    let mut text_parts: Vec<String> = Vec::new();
+    let ParsedFields {
+        text,
+        priority,
+        due,
+        est_secs,
+    } = parse_task_fields(args, now_local)?;
 
-    for arg in args {
-        if let Some(rest) = arg.strip_prefix("p:") {
-            updated.priority = rest
-                .parse()
-                .map_err(|e: String| Error::Parse(e))?;
-        } else if let Some(rest) = arg.strip_prefix("due:") {
-            updated.due = parse_due(rest, now_local)?.with_timezone(&chrono::Utc);
-        } else if let Some(rest) = arg.strip_prefix("est:") {
-            updated.est_secs = parse_duration(rest)?.num_seconds();
-        } else {
-            text_parts.push(arg.clone());
-        }
-    }
-
-    if !text_parts.is_empty() {
-        updated.text = text_parts.join(" ");
-    }
-
-    if updated == task {
-        return Ok(());
-    }
-
-    store.update_task_with_revert(task, updated, clock)
+    store.mutate_task(
+        id,
+        MutateKind::Edit,
+        |before| {
+            ensure_editable(before)?;
+            let mut updated = before.clone();
+            if let Some(t) = text {
+                updated.text = t;
+            }
+            if let Some(p) = priority {
+                updated.priority = p;
+            }
+            if let Some(d) = due {
+                updated.due = d.with_timezone(&chrono::Utc);
+            }
+            if let Some(e) = est_secs {
+                updated.est_secs = e;
+            }
+            Ok(updated)
+        },
+        clock,
+    )?;
+    Ok(())
 }
 
 fn run_form(
@@ -57,16 +59,34 @@ fn run_form(
     editor: &dyn TaskEditor,
 ) -> Result<()> {
     let task = store.get_task(id)?;
-    let mut baseline = task.clone();
+    ensure_editable(&task)?;
     let mut save = |proposed: crate::model::Task| -> Result<crate::model::Task> {
-        if proposed == baseline {
-            return Ok(proposed);
-        }
-        store.update_task_with_revert(baseline.clone(), proposed.clone(), clock)?;
-        baseline = proposed.clone();
-        Ok(proposed)
+        // Read the actual current state inside the write txn — the form editor's idea
+        // of "baseline" may be stale if another process touched the task in the
+        // meantime, and we want the recorded `before` to match what we're actually
+        // overwriting.
+        store.mutate_task(
+            id,
+            MutateKind::Edit,
+            |_current| Ok(proposed.clone()),
+            clock,
+        )
     };
     editor.edit(&task, &mut save)
+}
+
+fn ensure_editable(task: &crate::model::Task) -> Result<()> {
+    match task.status {
+        Status::Active => Ok(()),
+        Status::Completed => Err(Error::Parse(format!(
+            "task #{} is completed; revert the completion via `task history` before editing",
+            task.id
+        ))),
+        Status::SoftDeleted => Err(Error::Parse(format!(
+            "task #{} is deleted; revert the deletion via `task history` before editing",
+            task.id
+        ))),
+    }
 }
 
 #[cfg(test)]

@@ -19,6 +19,13 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
             .map_err(|_| Error::Parse(format!("invalid number '{num_str}'")))?
     };
 
+    if !value.is_finite() {
+        return Err(Error::Parse(format!("invalid duration '{num_str}'")));
+    }
+    if value < 0.0 {
+        return Err(Error::Parse("duration must not be negative".into()));
+    }
+
     let secs = match suffix {
         "s" | "sec" | "secs" | "second" | "seconds" => value,
         "m" | "min" | "mins" | "minute" | "minutes" | "" => value * 60.0,
@@ -32,7 +39,14 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
         other => return Err(Error::Parse(format!("unknown duration unit '{other}'"))),
     };
 
-    Ok(Duration::seconds(secs as i64))
+    // Cap at chrono's safe range. `Duration::try_seconds` rejects anything outside
+    // `i64::MIN/1000 .. i64::MAX/1000` (it stores milliseconds internally), so check
+    // both the f64-to-i64 conversion and chrono's own bounds.
+    if !secs.is_finite() || secs > (i64::MAX / 1000) as f64 {
+        return Err(Error::Parse("duration too large".into()));
+    }
+    Duration::try_seconds(secs as i64)
+        .ok_or_else(|| Error::Parse("duration too large".into()))
 }
 
 #[cfg(test)]
@@ -140,5 +154,26 @@ mod tests {
     #[test]
     fn parse_fractional_hours() {
         assert_eq!(parse_duration("1.5h").unwrap(), Duration::minutes(90));
+    }
+
+    #[test]
+    fn parse_negative_returns_error() {
+        assert!(parse_duration("-1h").is_err());
+        assert!(parse_duration("-30m").is_err());
+        assert!(parse_duration("-5").is_err());
+    }
+
+    #[test]
+    fn parse_huge_returns_error_not_panic() {
+        // C1 regression: chrono's Duration::seconds used to panic on out-of-range.
+        assert!(parse_duration("9999999999999h").is_err());
+        assert!(parse_duration("9999999999999w").is_err());
+        assert!(parse_duration("99999999999999999999d").is_err());
+    }
+
+    #[test]
+    fn parse_nan_returns_error() {
+        // Not strictly reachable via f64::parse, but make the guard explicit.
+        assert!(parse_duration("inf h").is_err() || parse_duration("infh").is_err());
     }
 }

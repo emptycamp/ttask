@@ -25,6 +25,14 @@ pub struct ClearStats {
     pub events_cleared: u32,
 }
 
+/// Which kind of history event to record for a `mutate_task` call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutateKind {
+    Edit,
+    Delete,
+    Complete,
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         std::fs::create_dir_all(path).map_err(Error::Io)?;
@@ -83,6 +91,30 @@ impl Store {
 
     pub fn add_task_with_revert(&mut self, task: Task, clock: &dyn Clock) -> Result<Task> {
         let mut txn = self.env.write_txn()?;
+        tasks::put(&mut txn, self.tasks_db, &task)?;
+        revert::push(
+            &mut txn,
+            self.revert_db,
+            self.meta_db,
+            RevertOp::Added { id: task.id },
+            clock.now(),
+        )?;
+        txn.commit()?;
+        Ok(task)
+    }
+
+    /// Allocate a new task ID and insert the task in a single write transaction.
+    ///
+    /// `build` is invoked with the next free ID inside the txn so two concurrent
+    /// `task add` invocations don't pick the same ID and clobber each other (the lmdb
+    /// writer is single-threaded, so the second one sees the first one's commit).
+    pub fn add_task_atomic<F>(&mut self, build: F, clock: &dyn Clock) -> Result<Task>
+    where
+        F: FnOnce(TaskId) -> Task,
+    {
+        let mut txn = self.env.write_txn()?;
+        let id = tasks::next_id(&txn, self.tasks_db)?;
+        let task = build(id);
         tasks::put(&mut txn, self.tasks_db, &task)?;
         revert::push(
             &mut txn,
@@ -162,6 +194,40 @@ impl Store {
         )?;
         txn.commit()?;
         Ok(())
+    }
+
+    /// Atomic read-modify-write. Reads the current task inside a write transaction,
+    /// invokes `modify` to produce the new state, then writes the new state and pushes
+    /// a history event — all in the same transaction.
+    ///
+    /// This prevents lost updates from concurrent edits: each writer sees the latest
+    /// committed state, so the recorded `before` and the persisted `after` are always
+    /// consistent.
+    pub fn mutate_task<F>(
+        &mut self,
+        id: TaskId,
+        kind: MutateKind,
+        modify: F,
+        clock: &dyn Clock,
+    ) -> Result<Task>
+    where
+        F: FnOnce(&Task) -> Result<Task>,
+    {
+        let mut txn = self.env.write_txn()?;
+        let before = tasks::get(&txn, self.tasks_db, id)?;
+        let after = modify(&before)?;
+        if after == before {
+            return Ok(after);
+        }
+        tasks::put(&mut txn, self.tasks_db, &after)?;
+        let op = match kind {
+            MutateKind::Edit => RevertOp::Edited { before },
+            MutateKind::Delete => RevertOp::Deleted { before },
+            MutateKind::Complete => RevertOp::Completed { before },
+        };
+        revert::push(&mut txn, self.revert_db, self.meta_db, op, clock.now())?;
+        txn.commit()?;
+        Ok(after)
     }
 
     pub fn hard_delete(&mut self, id: TaskId) -> Result<()> {

@@ -174,7 +174,7 @@ fn weekday_short(w: chrono::Weekday) -> &'static str {
 pub fn format_list_row(task: &Task, now: DateTime<Utc>, opts: &RenderOptions) -> String {
     let due_str = format_relative(task.due, now);
     let est_str = format_est(task.est_secs);
-    let text = truncate(&task.text, TEXT_W);
+    let text = truncate(&sanitize_for_terminal(&task.text), TEXT_W);
 
     let pri_letter = task.priority.to_string();
     let pri_styled = if opts.color {
@@ -183,10 +183,15 @@ pub fn format_list_row(task: &Task, now: DateTime<Utc>, opts: &RenderOptions) ->
         pri_letter
     };
 
+    // H8: a leading two-character status badge so `--all` (which mixes active /
+    // completed / deleted rows) is readable. Active rows show "  " so the existing
+    // active-only view looks unchanged.
+    let status_badge = status_badge(task.status, opts);
+
     // {pri_styled} is a 1-char visible cell; ANSI escape codes don't count toward
     // the format-string width, so the surrounding columns still line up.
     format!(
-        "    {:>w_id$}  {pri_styled}  {:<w_text$}  {:>w_due$}  {:>w_est$}",
+        "  {status_badge}{:>w_id$}  {pri_styled}  {:<w_text$}  {:>w_due$}  {:>w_est$}",
         task.id,
         text,
         due_str,
@@ -196,6 +201,51 @@ pub fn format_list_row(task: &Task, now: DateTime<Utc>, opts: &RenderOptions) ->
         w_due = DUE_W,
         w_est = EST_W,
     )
+}
+
+/// Two-character status badge prefix used in list rows. Active is blank so the
+/// active-only view (the common case) shows no clutter; completed and deleted rows
+/// get clearly visible markers that survive even when color is disabled.
+fn status_badge(status: Status, opts: &RenderOptions) -> String {
+    let marker = match status {
+        Status::Active => "  ",
+        Status::Completed => "✓ ",
+        Status::SoftDeleted => "✗ ",
+    };
+    if !opts.color || status == Status::Active {
+        return marker.to_string();
+    }
+    let color = match status {
+        Status::Completed => Color::Green,
+        Status::SoftDeleted => Color::DarkGrey,
+        Status::Active => Color::Reset,
+    };
+    format!("{}", marker.with(color))
+}
+
+/// Strip ANSI escape sequences and unrenderable control bytes from user-supplied text
+/// before showing it. The DB is shared / sync'd, so a malicious task description
+/// could otherwise embed terminal escapes (cursor moves, color changes, alternate
+/// screen) that would let a writer mess up the reader's terminal. Tabs collapse to a
+/// single space because they otherwise break column alignment.
+pub fn sanitize_for_terminal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            // Newlines and tabs break table alignment.
+            '\n' | '\r' => out.push(' '),
+            '\t' => out.push(' '),
+            // ESC (0x1B) starts ANSI escape sequences — drop it. Same for the other
+            // C0/C1 control bytes (except TAB/LF/CR which we handled above and the
+            // ordinary printable range starting at 0x20).
+            c if (c as u32) < 0x20 => out.push('·'),
+            c if (c as u32) == 0x7f => out.push('·'),
+            // C1 control range U+0080..=U+009F (some terminals interpret these).
+            c if (0x80..=0x9F).contains(&(c as u32)) => out.push('·'),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// The day a task should be grouped under in the list. For active tasks whose due
@@ -266,7 +316,7 @@ pub fn format_info(task: &Task, opts: &RenderOptions) -> String {
     let mut out = format!(
         "Task #{}\n  Text:     {}\n  Priority: {}\n  Status:   {}\n  Due:      {} ({})\n  Est:      {}\n  Created:  {}\n",
         task.id,
-        task.text,
+        sanitize_for_terminal(&task.text),
         priority_str,
         status,
         due_relative,
@@ -607,5 +657,53 @@ mod tests {
         let opts = RenderOptions::no_color();
         let out = format_history(&[], &opts);
         assert!(out.contains("No history"));
+    }
+
+    #[test]
+    fn sanitize_strips_ansi_escape() {
+        let s = sanitize_for_terminal("hi\x1b[31mred\x1b[0m bye");
+        assert!(!s.contains('\x1b'), "ESC should be removed, got: {s:?}");
+    }
+
+    #[test]
+    fn sanitize_collapses_tabs_to_space() {
+        let s = sanitize_for_terminal("a\tb\tc");
+        assert_eq!(s, "a b c");
+    }
+
+    #[test]
+    fn sanitize_replaces_newlines_with_space() {
+        let s = sanitize_for_terminal("line1\nline2");
+        assert!(!s.contains('\n'));
+    }
+
+    #[test]
+    fn format_list_row_strips_control_chars_from_text() {
+        // H9 regression: tabs/newlines/ANSI in text broke alignment & opened the
+        // door to terminal escape attacks.
+        let opts = RenderOptions::no_color();
+        let task = make_task(1, "evil\x1b[31m\ttext\n", Priority::B, base());
+        let row = format_list_row(&task, base(), &opts);
+        assert!(!row.contains('\x1b'));
+        assert!(!row.contains('\t'));
+    }
+
+    #[test]
+    fn format_list_row_shows_status_badge_for_deleted() {
+        // H8 regression: --all used to render deleted rows identically to active.
+        let opts = RenderOptions::no_color();
+        let mut t = make_task(1, "gone", Priority::B, base());
+        t.status = Status::SoftDeleted;
+        let row = format_list_row(&t, base(), &opts);
+        assert!(row.contains('✗'), "row should carry a deleted marker: {row}");
+    }
+
+    #[test]
+    fn format_list_row_shows_status_badge_for_completed() {
+        let opts = RenderOptions::no_color();
+        let mut t = make_task(1, "done", Priority::B, base());
+        t.status = Status::Completed;
+        let row = format_list_row(&t, base(), &opts);
+        assert!(row.contains('✓'), "row should carry a completed marker: {row}");
     }
 }

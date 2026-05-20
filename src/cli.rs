@@ -2,7 +2,7 @@ use crate::model::TaskId;
 use clap::{ArgGroup, Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "task", about = "Personal task manager")]
+#[command(name = "task", about = "Personal task manager", version = env!("CARGO_PKG_VERSION"))]
 pub struct Cli {
     #[arg(long, global = true, hide = true)]
     pub test: bool,
@@ -69,11 +69,13 @@ Examples:
     #[command(long_about = "\
 Edit an existing task.
 
-With no field args, opens the built-in form editor inside the terminal.
+With no field args, opens the built-in form editor inside the terminal. The form
+editor requires a real TTY; in scripts or piped contexts, pass field args
+(p:/due:/est:/text) directly.
 
 Examples:
   task edit 3                       # open the form editor in this terminal
-  task edit 3 p:a                   # set priority via args
+  task edit 3 p:a                   # set priority via args (scriptable)
   task edit 3 New text              # change text via args
   task update 3 due:tomorrow est:30m
   task modify 3 p:c                 # alias

@@ -1,17 +1,32 @@
 use crate::clock::Clock;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::model::{Status, TaskId};
-use crate::store::Store;
+use crate::store::{MutateKind, Store};
 
 pub fn run(id: TaskId, store: &mut Store, clock: &dyn Clock) -> Result<()> {
-    let before = store.get_task(id)?;
-    if before.status == Status::Completed {
-        return Ok(());
-    }
-    let mut after = before.clone();
-    after.status = Status::Completed;
-    after.completed_at = Some(clock.now());
-    store.complete_task_with_revert(before, after, clock)
+    let now = clock.now();
+    store.mutate_task(
+        id,
+        MutateKind::Complete,
+        |before| match before.status {
+            Status::Completed => Err(Error::Parse(format!(
+                "task #{} is already completed",
+                before.id
+            ))),
+            Status::SoftDeleted => Err(Error::Parse(format!(
+                "task #{} is deleted; revert the deletion before completing",
+                before.id
+            ))),
+            Status::Active => {
+                let mut after = before.clone();
+                after.status = Status::Completed;
+                after.completed_at = Some(now);
+                Ok(after)
+            }
+        },
+        clock,
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -61,7 +76,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_already_completed_is_noop() {
+    fn complete_already_completed_returns_error() {
         let dir = tempdir().unwrap();
         let mut store = Store::open(dir.path()).unwrap();
         let mut task = make_task(1);
@@ -69,6 +84,22 @@ mod tests {
         task.completed_at = Some(Utc::now());
         store.add_task(task).unwrap();
         let clock = make_clock();
-        assert!(run(1, &mut store, &clock).is_ok());
+        let err = run(1, &mut store, &clock).unwrap_err();
+        assert!(format!("{err}").contains("already completed"));
+    }
+
+    #[test]
+    fn complete_deleted_returns_error() {
+        // H7: completing a soft-deleted task left it in a hybrid "completed and deleted"
+        // state. Reject it instead.
+        let dir = tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        let mut task = make_task(1);
+        task.status = Status::SoftDeleted;
+        task.deleted_at = Some(Utc::now());
+        store.add_task(task).unwrap();
+        let clock = make_clock();
+        let err = run(1, &mut store, &clock).unwrap_err();
+        assert!(format!("{err}").contains("deleted"));
     }
 }

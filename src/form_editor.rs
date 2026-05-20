@@ -695,6 +695,15 @@ fn priority_color(p: Priority) -> Color {
 }
 
 pub fn run(task: &Task, save: &mut Saver<'_>) -> Result<()> {
+    // L6/L8: surface a friendly, actionable error before we try to enter raw mode.
+    // Without this the crossterm calls below bubble up a bare "io error: No such
+    // device" message that doesn't tell the user *what to do*.
+    use std::io::IsTerminal;
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return Err(Error::Parse(
+            "the form editor requires a TTY; pass field args instead, e.g. `task edit <id> p:a` or `task edit <id> due:tomorrow`".into(),
+        ));
+    }
     enable_raw_mode().map_err(Error::Io)?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen).map_err(Error::Io)?;

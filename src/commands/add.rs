@@ -2,52 +2,41 @@ use crate::clock::Clock;
 use crate::error::{Error, Result};
 use crate::model::{Priority, Status, Task};
 use crate::store::Store;
-use crate::time::{parse_due, parse_duration};
+use crate::time::parse_fields::{parse_task_fields, ParsedFields};
 use chrono::Local;
 
 pub fn run(args: &[String], store: &mut Store, clock: &dyn Clock) -> Result<Task> {
     let now_utc = clock.now();
     let now_local: chrono::DateTime<Local> = now_utc.into();
 
-    let mut text_parts: Vec<String> = Vec::new();
-    let mut priority = Priority::B;
-    let mut due = now_utc + chrono::Duration::minutes(5);
-    let mut est_secs: i64 = 1800;
-
-    for arg in args {
-        if let Some(rest) = arg.strip_prefix("p:") {
-            priority = rest
-                .parse()
-                .map_err(|e: String| Error::Parse(e))?;
-        } else if let Some(rest) = arg.strip_prefix("due:") {
-            due = parse_due(rest, now_local)?.with_timezone(&chrono::Utc);
-        } else if let Some(rest) = arg.strip_prefix("est:") {
-            est_secs = parse_duration(rest)?.num_seconds();
-        } else {
-            text_parts.push(arg.clone());
-        }
-    }
-
-    if text_parts.is_empty() {
-        return Err(Error::Parse("task text is required".into()));
-    }
-
-    let text = text_parts.join(" ");
-    let id = store.next_id()?;
-
-    let task = Task {
-        id,
+    let ParsedFields {
         text,
         priority,
         due,
         est_secs,
-        status: Status::Active,
-        created_at: now_utc,
-        completed_at: None,
-        deleted_at: None,
-    };
+    } = parse_task_fields(args, now_local)?;
 
-    store.add_task_with_revert(task, clock)
+    let text = text.ok_or_else(|| Error::Parse("task text is required".into()))?;
+    let priority = priority.unwrap_or(Priority::B);
+    let due = due
+        .map(|d| d.with_timezone(&chrono::Utc))
+        .unwrap_or_else(|| now_utc + chrono::Duration::minutes(5));
+    let est_secs = est_secs.unwrap_or(1800);
+
+    store.add_task_atomic(
+        |id| Task {
+            id,
+            text,
+            priority,
+            due,
+            est_secs,
+            status: Status::Active,
+            created_at: now_utc,
+            completed_at: None,
+            deleted_at: None,
+        },
+        clock,
+    )
 }
 
 #[cfg(test)]
