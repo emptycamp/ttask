@@ -96,6 +96,17 @@ pub fn format_with_footer(output: &str, gc_count: u32) -> String {
     }
 }
 
+pub fn format_with_footer_md(output: &str, gc_count: u32) -> String {
+    if gc_count > 0 {
+        format!(
+            "{output}\n_{gc_count} task{} aged out._\n",
+            if gc_count == 1 { "" } else { "s" }
+        )
+    } else {
+        output.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,26 +201,82 @@ mod tests {
         assert!(output.contains("task 3"));
     }
 
+    /// Build a UTC due-time at noon local time, `day_offset` days from today. Noon
+    /// dodges DST + midnight rollover so the test is stable on any system clock.
+    fn due_at_local_noon(day_offset: i64) -> chrono::DateTime<Utc> {
+        use chrono::{Local, TimeZone};
+        let today = Local::now().date_naive();
+        let naive = (today + chrono::Duration::days(day_offset))
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        Local
+            .from_local_datetime(&naive)
+            .single()
+            .expect("noon is never DST-ambiguous")
+            .with_timezone(&Utc)
+    }
+
     #[test]
-    fn list_default_compact_truncates_to_4_per_day() {
+    fn list_default_compact_caps_to_two_day_groups() {
+        // Three different days; default (implicit Active) should show two and silently
+        // drop the third — no "+N more days hidden" footer in the compact view.
         let dir = tempdir().unwrap();
         let mut store = Store::open(dir.path()).unwrap();
-        for i in 1..=6 {
-            store.add_task(make_task(i, Status::Active)).unwrap();
+        for i in 0..3 {
+            let mut t = make_task(i + 1, Status::Active);
+            t.due = due_at_local_noon(i as i64 + 1);
+            store.add_task(t).unwrap();
         }
 
         let opts = RenderOptions::no_color();
         let (output, _) = run(&store, default_choice(), &opts).unwrap();
-        // Two tasks should be hidden under the +2 marker.
-        assert!(output.contains("+2"));
+        assert!(
+            !output.contains("more day"),
+            "compact view must not emit a 'more days hidden' footer:\n{output}"
+        );
+    }
+
+    #[test]
+    fn list_default_compact_caps_to_three_per_day() {
+        // Five tasks all on the same future day — default (implicit Active) caps at 3.
+        let dir = tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        let day = due_at_local_noon(1);
+        for i in 0..5 {
+            let mut t = make_task(i + 1, Status::Active);
+            t.text = format!("row{i}");
+            t.due = day + chrono::Duration::minutes(i as i64);
+            store.add_task(t).unwrap();
+        }
+
+        let opts = RenderOptions::no_color();
+        let (output, _) = run(&store, default_choice(), &opts).unwrap();
+        for i in 0..3 {
+            assert!(
+                output.contains(&format!("row{i}")),
+                "expected row{i} visible in:\n{output}"
+            );
+        }
+        for i in 3..5 {
+            assert!(
+                !output.contains(&format!("row{i}")),
+                "row{i} should be hidden in:\n{output}"
+            );
+        }
+        assert!(
+            output.contains("+2"),
+            "expected +2 overflow marker in:\n{output}"
+        );
     }
 
     #[test]
     fn list_explicit_active_does_not_truncate() {
         let dir = tempdir().unwrap();
         let mut store = Store::open(dir.path()).unwrap();
-        for i in 1..=6 {
-            store.add_task(make_task(i, Status::Active)).unwrap();
+        for i in 0..3 {
+            let mut t = make_task(i + 1, Status::Active);
+            t.due = due_at_local_noon(i as i64 + 1);
+            store.add_task(t).unwrap();
         }
 
         let opts = RenderOptions::no_color();
@@ -218,7 +285,41 @@ mod tests {
             explicit: true,
         };
         let (output, _) = run(&store, choice, &opts).unwrap();
-        assert!(!output.contains("+"));
+        assert!(
+            !output.contains("more day"),
+            "explicit --active should not hide days: {output}"
+        );
+    }
+
+    #[test]
+    fn list_explicit_active_does_not_cap_rows_per_day() {
+        // Same data as the cap test, but with --active (explicit) — Full mode shows all.
+        let dir = tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        let day = due_at_local_noon(1);
+        for i in 0..5 {
+            let mut t = make_task(i + 1, Status::Active);
+            t.text = format!("row{i}");
+            t.due = day + chrono::Duration::minutes(i as i64);
+            store.add_task(t).unwrap();
+        }
+
+        let opts = RenderOptions::no_color();
+        let choice = FilterChoice {
+            filter: Filter::Active,
+            explicit: true,
+        };
+        let (output, _) = run(&store, choice, &opts).unwrap();
+        for i in 0..5 {
+            assert!(
+                output.contains(&format!("row{i}")),
+                "expected row{i} in explicit --active output:\n{output}"
+            );
+        }
+        assert!(
+            !output.contains('+'),
+            "explicit --active must not show an overflow marker:\n{output}"
+        );
     }
 
     #[test]

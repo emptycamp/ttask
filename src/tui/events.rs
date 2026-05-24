@@ -52,7 +52,7 @@ pub fn handle(app: &mut App, key: KeyEvent) -> Action {
                 toggle_change(app, PendingChange::ToggleDelete(task.id));
             }
         }
-        (KeyCode::Char('e'), KeyModifiers::NONE) | (KeyCode::Enter, _) => {
+        (KeyCode::Char('e'), KeyModifiers::NONE) => {
             if let Some(task) = app.tasks.get(app.cursor) {
                 return Action::EditTask(task.id);
             }
@@ -282,10 +282,10 @@ mod tests {
     }
 
     #[test]
-    fn enter_returns_edit_action() {
+    fn enter_is_noop() {
         let mut app = make_app();
         let action = handle(&mut app, key(KeyCode::Enter));
-        assert_eq!(action, Action::EditTask(1));
+        assert_eq!(action, Action::Continue);
     }
 
     #[test]

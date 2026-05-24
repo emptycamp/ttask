@@ -298,10 +298,13 @@ mod tests {
             .map(|(i, id)| {
                 let op = if i == event_ids.len() - 1 {
                     // The oldest entry is the original add.
-                    RevertOp::Added { id: task_id }
+                    RevertOp::Added {
+                        task: baseline.clone(),
+                    }
                 } else {
                     RevertOp::Edited {
                         before: baseline.clone(),
+                        after: baseline.clone(),
                     }
                 };
                 (*id, HistoryEntry { op, timestamp: now })
@@ -396,35 +399,44 @@ mod tests {
             (
                 5,
                 HistoryEntry {
-                    op: RevertOp::Edited { before: t(2) },
+                    op: RevertOp::Edited {
+                        before: t(2),
+                        after: t(2),
+                    },
                     timestamp: now,
                 },
             ),
             (
                 4,
                 HistoryEntry {
-                    op: RevertOp::Edited { before: t(1) },
+                    op: RevertOp::Edited {
+                        before: t(1),
+                        after: t(1),
+                    },
                     timestamp: now,
                 },
             ),
             (
                 3,
                 HistoryEntry {
-                    op: RevertOp::Added { id: 2 },
+                    op: RevertOp::Added { task: t(2) },
                     timestamp: now,
                 },
             ),
             (
                 2,
                 HistoryEntry {
-                    op: RevertOp::Edited { before: t(1) },
+                    op: RevertOp::Edited {
+                        before: t(1),
+                        after: t(1),
+                    },
                     timestamp: now,
                 },
             ),
             (
                 1,
                 HistoryEntry {
-                    op: RevertOp::Added { id: 1 },
+                    op: RevertOp::Added { task: t(1) },
                     timestamp: now,
                 },
             ),
@@ -474,28 +486,34 @@ mod tests {
             (
                 4,
                 HistoryEntry {
-                    op: RevertOp::Edited { before: t(1) },
+                    op: RevertOp::Edited {
+                        before: t(1),
+                        after: t(1),
+                    },
                     timestamp: now,
                 },
             ),
             (
                 3,
                 HistoryEntry {
-                    op: RevertOp::Added { id: 2 },
+                    op: RevertOp::Added { task: t(2) },
                     timestamp: now,
                 },
             ),
             (
                 2,
                 HistoryEntry {
-                    op: RevertOp::Edited { before: t(1) },
+                    op: RevertOp::Edited {
+                        before: t(1),
+                        after: t(1),
+                    },
                     timestamp: now,
                 },
             ),
             (
                 1,
                 HistoryEntry {
-                    op: RevertOp::Added { id: 1 },
+                    op: RevertOp::Added { task: t(1) },
                     timestamp: now,
                 },
             ),

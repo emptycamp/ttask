@@ -42,3 +42,19 @@ fn info_nonexistent_task_fails() {
     let scope = StoreScope::new();
     task(&scope).args(["info", "99"]).assert().failure();
 }
+
+#[test]
+fn info_format_md_outputs_markdown() {
+    let scope = StoreScope::new();
+    task(&scope)
+        .args(["add", "Buy milk", "p:a"])
+        .assert()
+        .success();
+    task(&scope)
+        .args(["--format", "md", "info", "1"])
+        .assert()
+        .success()
+        .stdout(contains("# Task #1"))
+        .stdout(contains("- **Text:** Buy milk"))
+        .stdout(contains("- **Priority:** A"));
+}

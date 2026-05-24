@@ -45,21 +45,39 @@ fn history_lists_events_after_adds() {
 }
 
 #[test]
-fn history_list_flag_is_explicit_list() {
+fn history_list_subcommand_is_explicit_list() {
     let scope = StoreScope::new();
     task(&scope).args(["add", "First"]).assert().success();
     task(&scope)
-        .args(["history", "--list"])
+        .args(["history", "list"])
         .assert()
         .success()
         .stdout(contains("added #1"));
 }
 
 #[test]
+fn history_list_alias_ls_works() {
+    let scope = StoreScope::new();
+    task(&scope).args(["add", "First"]).assert().success();
+    task(&scope)
+        .args(["history", "ls"])
+        .assert()
+        .success()
+        .stdout(contains("added #1"));
+}
+
+#[test]
+fn history_list_dashes_flag_is_no_longer_recognized() {
+    let scope = StoreScope::new();
+    task(&scope).args(["add", "First"]).assert().success();
+    task(&scope).args(["history", "--list"]).assert().failure();
+}
+
+#[test]
 fn history_when_column_is_relative() {
     let scope = StoreScope::new();
     task(&scope).args(["add", "First"]).assert().success();
-    let output = task(&scope).args(["history", "--list"]).output().unwrap();
+    let output = task(&scope).args(["history", "list"]).output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Should contain something like "just now" or "Xm ago" — never an absolute date.
     let has_relative = stdout.contains("just now") || stdout.contains("ago");
@@ -227,7 +245,7 @@ fn history_revert_independent_tasks_do_not_cascade() {
     task(&scope).args(["add", "second"]).assert().success();
     task(&scope).args(["add", "third"]).assert().success();
 
-    let output = task(&scope).args(["history", "--list"]).output().unwrap();
+    let output = task(&scope).args(["history", "list"]).output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let oldest_id = stdout
         .lines()
@@ -293,7 +311,7 @@ fn history_revert_latest_only_reverts_one() {
     task(&scope).args(["add", "first"]).assert().success();
     task(&scope).args(["add", "second"]).assert().success();
 
-    let output = task(&scope).args(["history", "--list"]).output().unwrap();
+    let output = task(&scope).args(["history", "list"]).output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let latest_id = stdout
         .lines()
@@ -331,4 +349,161 @@ fn history_alias_log_works() {
         .assert()
         .success()
         .stdout(contains("added #1"));
+}
+
+#[test]
+fn history_format_md_outputs_markdown_table() {
+    let scope = StoreScope::new();
+    task(&scope).args(["add", "First"]).assert().success();
+    task(&scope)
+        .args(["--format", "md", "history"])
+        .assert()
+        .success()
+        .stdout(contains("# History"))
+        .stdout(contains("| ID | When | Event |"))
+        .stdout(contains("added #1"));
+}
+
+#[test]
+fn list_format_md_with_add_outputs_info_card() {
+    // `task add --format md` should render the full new task as a markdown info card.
+    let scope = StoreScope::new();
+    task(&scope)
+        .args(["--format", "md", "add", "Hello"])
+        .assert()
+        .success()
+        .stdout(contains("# Task #1"))
+        .stdout(contains("- **Text:** Hello"));
+}
+
+#[test]
+fn history_list_default_summary_is_minimal_for_edits() {
+    let scope = StoreScope::new();
+    task(&scope).args(["add", "Buy milk"]).assert().success();
+    task(&scope)
+        .args(["edit", "1", "Buy almond milk", "p:a"])
+        .assert()
+        .success();
+    let output = task(&scope)
+        .args(["history", "list"])
+        .output()
+        .expect("history list");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Minimal: only the field tokens, no quoted before/after values, no arrows.
+    assert!(
+        stdout.contains("edited #1: text, p"),
+        "expected minimal field tokens, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains('→'),
+        "default summary must not include old→new arrows:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Buy almond milk"),
+        "default summary must not include the new text value:\n{stdout}"
+    );
+}
+
+#[test]
+fn history_list_verbose_includes_diff_for_edits() {
+    let scope = StoreScope::new();
+    task(&scope).args(["add", "Buy milk"]).assert().success();
+    task(&scope)
+        .args(["edit", "1", "Buy almond milk", "p:a"])
+        .assert()
+        .success();
+    task(&scope)
+        .args(["history", "list", "-v"])
+        .assert()
+        .success()
+        .stdout(contains("text \"Buy milk\"→\"Buy almond milk\""))
+        .stdout(contains("p B→A"));
+}
+
+#[test]
+fn history_list_verbose_long_flag_works() {
+    let scope = StoreScope::new();
+    task(&scope).args(["add", "Buy milk"]).assert().success();
+    task(&scope)
+        .args(["edit", "1", "Buy almond milk"])
+        .assert()
+        .success();
+    task(&scope)
+        .args(["history", "list", "--verbose"])
+        .assert()
+        .success()
+        .stdout(contains("text \"Buy milk\"→\"Buy almond milk\""));
+}
+
+#[test]
+fn history_list_non_edit_events_unchanged_by_verbose_flag() {
+    // Added/Deleted/Completed already carry the text in minimal mode — verbose
+    // shouldn't alter them.
+    let scope = StoreScope::new();
+    task(&scope).args(["add", "Quick chore"]).assert().success();
+    let minimal = task(&scope).args(["history", "list"]).output().unwrap();
+    let verbose = task(&scope)
+        .args(["history", "list", "-v"])
+        .output()
+        .unwrap();
+    let m = String::from_utf8_lossy(&minimal.stdout);
+    let v = String::from_utf8_lossy(&verbose.stdout);
+    assert!(m.contains("added #1: Quick chore"));
+    assert!(v.contains("added #1: Quick chore"));
+}
+
+#[test]
+fn history_list_format_md_always_renders_verbose_diff() {
+    // Md mode is for LLM agents — they want the full diff on every event without
+    // having to remember a flag. The `-v` flag still works but is a no-op in md.
+    let scope = StoreScope::new();
+    task(&scope).args(["add", "x"]).assert().success();
+    task(&scope).args(["edit", "1", "y"]).assert().success();
+    task(&scope)
+        .args(["--format", "md", "history", "list"])
+        .assert()
+        .success()
+        .stdout(contains("text \"x\"→\"y\""));
+}
+
+#[test]
+fn history_list_format_md_with_verbose_flag_is_still_verbose() {
+    let scope = StoreScope::new();
+    task(&scope).args(["add", "x"]).assert().success();
+    task(&scope).args(["edit", "1", "y"]).assert().success();
+    task(&scope)
+        .args(["--format", "md", "history", "list", "-v"])
+        .assert()
+        .success()
+        .stdout(contains("text \"x\"→\"y\""));
+}
+
+#[test]
+fn history_revert_message_uses_verbose_summary_even_in_default_mode() {
+    // Revert confirmations and "Reverted event #N: ..." should always carry the full
+    // diff, since the user is acting on the change and wants to see what it was.
+    let scope = StoreScope::new();
+    task(&scope).args(["add", "Buy milk"]).assert().success();
+    task(&scope)
+        .args(["edit", "1", "Buy almond milk"])
+        .assert()
+        .success();
+    let output = task(&scope).args(["history", "list"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let edit_event_id = stdout
+        .lines()
+        .find(|l| l.contains("edited #1"))
+        .and_then(|l| {
+            l.trim_start()
+                .split_whitespace()
+                .next()?
+                .parse::<u64>()
+                .ok()
+        })
+        .expect("expected an edit event");
+    task(&scope)
+        .args(["history", "--revert", &edit_event_id.to_string(), "-y"])
+        .assert()
+        .success()
+        .stdout(contains("text \"Buy milk\"→\"Buy almond milk\""));
 }

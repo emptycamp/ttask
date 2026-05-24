@@ -175,4 +175,70 @@ fn list_output_includes_header() {
         .stdout(contains("Est"));
 }
 
+#[test]
+fn list_format_md_outputs_markdown_table() {
+    let scope = StoreScope::new();
+    task(&scope).args(["add", "Buy milk"]).assert().success();
+    task(&scope)
+        .args(["--format", "md", "list"])
+        .assert()
+        .success()
+        .stdout(contains("# Tasks"))
+        .stdout(contains("| ID | Pri | Status | Description | Due | Est |"))
+        .stdout(contains("Buy milk"));
+}
+
+#[test]
+fn list_format_md_empty_uses_no_tasks_italic() {
+    let scope = StoreScope::new();
+    task(&scope)
+        .args(["--format", "md", "list"])
+        .assert()
+        .success()
+        .stdout(contains("_No tasks._"));
+}
+
+#[test]
+fn list_format_md_announces_hidden_rows_and_command_hint() {
+    // Five tasks all due today — compact md should render 3 rows, mark the day
+    // header `(+2 more)`, and append an agent-facing footer that names the exact
+    // command the agent can run to see the rest.
+    let scope = StoreScope::new();
+    for i in 0..5 {
+        task(&scope)
+            .args(["add", &format!("today{i}")])
+            .assert()
+            .success();
+    }
+    task(&scope)
+        .args(["--format", "md", "list"])
+        .assert()
+        .success()
+        .stdout(contains("3 shown / 5 total"))
+        .stdout(contains("(+2 more)"))
+        .stdout(contains("+2 tasks hidden within shown days"))
+        .stdout(contains("`task list --active --format md`"))
+        .stdout(contains("`task list --all --format md`"));
+}
+
+#[test]
+fn list_format_md_no_truncation_footer_when_nothing_hidden() {
+    let scope = StoreScope::new();
+    task(&scope).args(["add", "only one"]).assert().success();
+    let output = task(&scope)
+        .args(["--format", "md", "list"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("Truncated"),
+        "no truncation footer when nothing was hidden:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("shown /"),
+        "heading should be plain when nothing was hidden:\n{stdout}"
+    );
+    assert!(stdout.contains("only one"));
+}
+
 use predicates::prelude::*;

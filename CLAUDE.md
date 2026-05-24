@@ -16,5 +16,6 @@ You are operating in a **network-isolated environment**.
 
 ## Code quality
 
+Always check project-conventions skill before making any changes!
 Ensure `cargo fmt --check` passes
 Ensure `cargo build` does not contain any warnings or suggestions

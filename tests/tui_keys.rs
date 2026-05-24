@@ -81,10 +81,10 @@ fn e_returns_edit_action() {
 }
 
 #[test]
-fn enter_returns_edit_action() {
+fn enter_is_noop() {
     let mut app = make_app();
     let action = handle(&mut app, press(KeyCode::Enter));
-    assert_eq!(action, Action::EditTask(1));
+    assert_eq!(action, Action::Continue);
 }
 
 #[test]

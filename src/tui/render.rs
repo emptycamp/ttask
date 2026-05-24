@@ -88,7 +88,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     ratatui::widgets::StatefulWidget::render(task_list, chunks[1], frame.buffer_mut(), &mut state);
 
     let help = Paragraph::new(Span::styled(
-        " ↑↓ task · ←→ day · a add · e/Enter edit · c complete · d delete · Shift+A/B/C priority · Esc quit ",
+        " ↑↓ task · ←→ day · a add · e edit · c complete · d delete · Shift+A/B/C priority · Esc quit ",
         Style::default().fg(Color::DarkGray),
     ));
     frame.render_widget(help, chunks[2]);
@@ -182,15 +182,17 @@ fn make_item(
     if has_complete {
         priority_style = Style::default().fg(Color::Green);
     } else if has_delete {
-        priority_style = priority_style.add_modifier(Modifier::CROSSED_OUT);
+        priority_style = Style::default()
+            .fg(Color::Red)
+            .add_modifier(Modifier::CROSSED_OUT);
     }
 
     let line_style = if has_complete {
         Style::default().fg(Color::Green)
     } else if has_delete {
         Style::default()
+            .fg(Color::Red)
             .add_modifier(Modifier::CROSSED_OUT)
-            .fg(Color::DarkGray)
     } else if selected {
         Style::default().fg(Color::White)
     } else {

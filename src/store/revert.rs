@@ -1,7 +1,8 @@
 use crate::error::{Error, Result};
-use crate::model::{Task, TaskId};
+use crate::format::format_est;
+use crate::model::{Priority, Task, TaskId};
 use crate::store::codec::Bincode;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, Utc};
 use heed::types::U64;
 use heed::{Database, RoTxn, RwTxn};
 use serde::{Deserialize, Serialize};
@@ -13,25 +14,68 @@ pub const MAX_HISTORY: usize = 30;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum RevertOp {
-    Added { id: TaskId },
-    Edited { before: Task },
-    Deleted { before: Task },
-    Completed { before: Task },
+    /// Task creation. Stores the full task so the history log can render the text,
+    /// priority, etc. even after the task is later deleted.
+    Added {
+        task: Task,
+    },
+    /// In-place edit. `before` is what the task looked like prior to the change (used
+    /// to revert) and `after` is the post-edit state (used to summarize *what* changed
+    /// in the history log).
+    Edited {
+        before: Task,
+        after: Task,
+    },
+    Deleted {
+        before: Task,
+    },
+    Completed {
+        before: Task,
+    },
 }
 
 impl RevertOp {
+    /// Compact summary used by `task history list` by default. For edits this prints
+    /// only the names of changed fields (e.g. `edited #1: text, p`); use
+    /// [`summary_verbose`](Self::summary_verbose) when the caller wants old→new values.
     pub fn summary(&self) -> String {
         match self {
-            RevertOp::Added { id } => format!("added #{id}"),
-            RevertOp::Edited { before } => {
-                format!("edited #{} ({})", before.id, truncate(&before.text, 30))
+            RevertOp::Added { task } => {
+                format!("added #{}: {}", task.id, truncate(&task.text, 30))
+            }
+            RevertOp::Edited { before, after } => {
+                let fields = changed_fields(before, after);
+                if fields.is_empty() {
+                    format!("edited #{}", before.id)
+                } else {
+                    format!("edited #{}: {}", before.id, fields.join(", "))
+                }
             }
             RevertOp::Deleted { before } => {
-                format!("deleted #{} ({})", before.id, truncate(&before.text, 30))
+                format!("deleted #{}: {}", before.id, truncate(&before.text, 30))
             }
             RevertOp::Completed { before } => {
-                format!("completed #{} ({})", before.id, truncate(&before.text, 30))
+                format!("completed #{}: {}", before.id, truncate(&before.text, 30))
             }
+        }
+    }
+
+    /// Detailed summary used by `task history list -v` and by revert confirmations.
+    /// For edits this prints the full per-field diff (`text "old"→"new", p A→B`); for
+    /// other variants it matches [`summary`](Self::summary).
+    pub fn summary_verbose(&self) -> String {
+        match self {
+            RevertOp::Edited { before, after } => {
+                let diff = diff_summary(before, after);
+                if diff.is_empty() {
+                    format!("edited #{}", before.id)
+                } else {
+                    format!("edited #{}: {diff}", before.id)
+                }
+            }
+            // Added/Deleted/Completed already carry the task text in their default
+            // summary — verbose mode adds nothing for them.
+            other => other.summary(),
         }
     }
 
@@ -40,12 +84,78 @@ impl RevertOp {
     /// don't share history.
     pub fn task_id(&self) -> TaskId {
         match self {
-            RevertOp::Added { id } => *id,
-            RevertOp::Edited { before } => before.id,
+            RevertOp::Added { task } => task.id,
+            RevertOp::Edited { before, .. } => before.id,
             RevertOp::Deleted { before } => before.id,
             RevertOp::Completed { before } => before.id,
         }
     }
+}
+
+/// Field-name indicators for the minimal edit summary, e.g. `["text", "p", "est"]`.
+fn changed_fields(before: &Task, after: &Task) -> Vec<&'static str> {
+    let mut parts: Vec<&'static str> = Vec::new();
+    if before.text != after.text {
+        parts.push("text");
+    }
+    if before.priority != after.priority {
+        parts.push("p");
+    }
+    if before.due != after.due {
+        parts.push("due");
+    }
+    if before.est_secs != after.est_secs {
+        parts.push("est");
+    }
+    parts
+}
+
+/// Build a compact per-field diff like `text "Buy milk"→"Buy almond milk", p A→B`.
+/// Skips fields that didn't change and trims long text so a row stays readable.
+fn diff_summary(before: &Task, after: &Task) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if before.text != after.text {
+        parts.push(format!(
+            "text {:?}→{:?}",
+            truncate(&before.text, 20),
+            truncate(&after.text, 20),
+        ));
+    }
+    if before.priority != after.priority {
+        parts.push(format!(
+            "p {}→{}",
+            priority_letter(before.priority),
+            priority_letter(after.priority),
+        ));
+    }
+    if before.due != after.due {
+        parts.push(format!(
+            "due {}→{}",
+            short_due(before.due),
+            short_due(after.due),
+        ));
+    }
+    if before.est_secs != after.est_secs {
+        parts.push(format!(
+            "est {}→{}",
+            format_est(before.est_secs),
+            format_est(after.est_secs),
+        ));
+    }
+    parts.join(", ")
+}
+
+fn priority_letter(p: Priority) -> char {
+    match p {
+        Priority::A => 'A',
+        Priority::B => 'B',
+        Priority::C => 'C',
+    }
+}
+
+fn short_due(due: DateTime<Utc>) -> String {
+    let local: DateTime<Local> = due.into();
+    local.format("%b%-d %H:%M").to_string()
 }
 
 fn truncate(s: &str, width: usize) -> String {
@@ -155,7 +265,14 @@ mod tests {
 
         let now = Utc::now();
         let mut txn = env.write_txn().unwrap();
-        push(&mut txn, rdb, mdb, RevertOp::Added { id: 1 }, now).unwrap();
+        push(
+            &mut txn,
+            rdb,
+            mdb,
+            RevertOp::Added { task: make_task(1) },
+            now,
+        )
+        .unwrap();
         push(
             &mut txn,
             rdb,
@@ -183,7 +300,16 @@ mod tests {
         let now = Utc::now();
         let mut txn = env.write_txn().unwrap();
         for i in 0..(MAX_HISTORY + 5) {
-            push(&mut txn, rdb, mdb, RevertOp::Added { id: i as TaskId }, now).unwrap();
+            push(
+                &mut txn,
+                rdb,
+                mdb,
+                RevertOp::Added {
+                    task: make_task(i as TaskId),
+                },
+                now,
+            )
+            .unwrap();
         }
         txn.commit().unwrap();
 
@@ -201,7 +327,14 @@ mod tests {
 
         let now = Utc::now();
         let mut txn = env.write_txn().unwrap();
-        push(&mut txn, rdb, mdb, RevertOp::Added { id: 1 }, now).unwrap();
+        push(
+            &mut txn,
+            rdb,
+            mdb,
+            RevertOp::Added { task: make_task(1) },
+            now,
+        )
+        .unwrap();
         let removed = delete(&mut txn, rdb, 1).unwrap();
         assert!(removed);
         txn.commit().unwrap();
@@ -211,17 +344,167 @@ mod tests {
     }
 
     #[test]
-    fn summary_added() {
-        let op = RevertOp::Added { id: 42 };
-        assert_eq!(op.summary(), "added #42");
+    fn summary_added_includes_text() {
+        let op = RevertOp::Added {
+            task: make_task(42),
+        };
+        let s = op.summary();
+        assert!(s.starts_with("added #42:"), "got: {s}");
+        assert!(s.contains("task 42"), "got: {s}");
     }
 
     #[test]
-    fn summary_edited_includes_text() {
-        let op = RevertOp::Edited {
-            before: make_task(7),
+    fn summary_edited_with_single_field_shows_only_field_name() {
+        let before = make_task(7);
+        let mut after = before.clone();
+        after.text = "renamed task".into();
+        let op = RevertOp::Edited { before, after };
+        // Minimal: just the field name, no old/new values.
+        assert_eq!(op.summary(), "edited #7: text");
+    }
+
+    #[test]
+    fn summary_edited_with_priority_change_uses_p_token() {
+        let before = make_task(3);
+        let mut after = before.clone();
+        after.priority = Priority::A;
+        let op = RevertOp::Edited { before, after };
+        assert_eq!(op.summary(), "edited #3: p");
+    }
+
+    #[test]
+    fn summary_edited_with_due_change_uses_due_token() {
+        let before = make_task(2);
+        let mut after = before.clone();
+        after.due = before.due + chrono::Duration::hours(1);
+        let op = RevertOp::Edited { before, after };
+        assert_eq!(op.summary(), "edited #2: due");
+    }
+
+    #[test]
+    fn summary_edited_with_est_change_uses_est_token() {
+        let before = make_task(5);
+        let mut after = before.clone();
+        after.est_secs = 7200;
+        let op = RevertOp::Edited { before, after };
+        assert_eq!(op.summary(), "edited #5: est");
+    }
+
+    #[test]
+    fn summary_edited_lists_all_changed_field_tokens_in_canonical_order() {
+        let before = make_task(9);
+        let mut after = before.clone();
+        after.text = "new text".into();
+        after.priority = Priority::C;
+        after.est_secs = 60;
+        let op = RevertOp::Edited { before, after };
+        // Order: text, p, due, est — independent of how the fields were assigned.
+        assert_eq!(op.summary(), "edited #9: text, p, est");
+    }
+
+    #[test]
+    fn summary_edited_with_no_changes_is_just_the_id() {
+        let before = make_task(11);
+        let after = before.clone();
+        let op = RevertOp::Edited { before, after };
+        assert_eq!(op.summary(), "edited #11");
+    }
+
+    #[test]
+    fn summary_deleted_includes_text() {
+        let op = RevertOp::Deleted {
+            before: make_task(4),
         };
-        assert!(op.summary().contains("edited #7"));
-        assert!(op.summary().contains("task 7"));
+        let s = op.summary();
+        assert!(s.starts_with("deleted #4:"), "got: {s}");
+        assert!(s.contains("task 4"), "got: {s}");
+    }
+
+    #[test]
+    fn summary_completed_includes_text() {
+        let op = RevertOp::Completed {
+            before: make_task(6),
+        };
+        let s = op.summary();
+        assert!(s.starts_with("completed #6:"), "got: {s}");
+        assert!(s.contains("task 6"), "got: {s}");
+    }
+
+    // ── Verbose summary ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn summary_verbose_added_matches_default() {
+        let op = RevertOp::Added { task: make_task(2) };
+        assert_eq!(op.summary_verbose(), op.summary());
+    }
+
+    #[test]
+    fn summary_verbose_deleted_matches_default() {
+        let op = RevertOp::Deleted {
+            before: make_task(8),
+        };
+        assert_eq!(op.summary_verbose(), op.summary());
+    }
+
+    #[test]
+    fn summary_verbose_completed_matches_default() {
+        let op = RevertOp::Completed {
+            before: make_task(3),
+        };
+        assert_eq!(op.summary_verbose(), op.summary());
+    }
+
+    #[test]
+    fn summary_verbose_edited_includes_old_and_new_text() {
+        let before = make_task(1);
+        let mut after = before.clone();
+        after.text = "renamed".into();
+        let op = RevertOp::Edited { before, after };
+        let v = op.summary_verbose();
+        assert!(v.contains("text \"task 1\"→\"renamed\""), "got: {v}");
+    }
+
+    #[test]
+    fn summary_verbose_edited_includes_priority_letters() {
+        let before = make_task(1);
+        let mut after = before.clone();
+        after.priority = Priority::A;
+        let op = RevertOp::Edited { before, after };
+        assert!(op.summary_verbose().contains("p B→A"));
+    }
+
+    #[test]
+    fn summary_verbose_edited_includes_est_units() {
+        let before = make_task(1);
+        let mut after = before.clone();
+        after.est_secs = 7200;
+        let op = RevertOp::Edited { before, after };
+        assert!(op.summary_verbose().contains("est 30m→2h"));
+    }
+
+    #[test]
+    fn summary_verbose_edited_with_no_change_is_just_the_id() {
+        let before = make_task(11);
+        let after = before.clone();
+        let op = RevertOp::Edited { before, after };
+        assert_eq!(op.summary_verbose(), "edited #11");
+    }
+
+    #[test]
+    fn summary_minimal_for_edits_does_not_include_arrows() {
+        // The whole point of the minimal form is that it omits old→new arrows.
+        let before = make_task(1);
+        let mut after = before.clone();
+        after.text = "x".into();
+        after.priority = Priority::A;
+        let s = RevertOp::Edited { before, after }.summary();
+        assert!(
+            !s.contains('→'),
+            "minimal summary must not include arrows: {s}"
+        );
+        assert!(
+            !s.contains('"'),
+            "minimal summary must not quote old/new values: {s}"
+        );
     }
 }

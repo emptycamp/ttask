@@ -46,10 +46,12 @@ impl Store {
 
         let mut txn = env.write_txn()?;
         let tasks_db = env.create_database(&mut txn, Some("tasks"))?;
-        // Named "history" (not "revert") to keep the new schema separate from any
-        // legacy RevertOp-encoded entries left over from an earlier version. Old data
-        // in "revert" is left in place but ignored.
-        let revert_db = env.create_database(&mut txn, Some("history"))?;
+        // Named "history_v2" to keep the new schema separate from any legacy
+        // RevertOp-encoded entries left over from earlier versions. Old data in
+        // "revert" and "history" is left in place but ignored — bincode lacks the
+        // tolerance for added/changed enum-variant fields, so re-reading historical
+        // entries would just fail to decode.
+        let revert_db = env.create_database(&mut txn, Some("history_v2"))?;
         let meta_db = env.create_database(&mut txn, Some("meta"))?;
         txn.commit()?;
 
@@ -96,7 +98,7 @@ impl Store {
             &mut txn,
             self.revert_db,
             self.meta_db,
-            RevertOp::Added { id: task.id },
+            RevertOp::Added { task: task.clone() },
             clock.now(),
         )?;
         txn.commit()?;
@@ -120,7 +122,7 @@ impl Store {
             &mut txn,
             self.revert_db,
             self.meta_db,
-            RevertOp::Added { id: task.id },
+            RevertOp::Added { task: task.clone() },
             clock.now(),
         )?;
         txn.commit()?;
@@ -151,7 +153,10 @@ impl Store {
             &mut txn,
             self.revert_db,
             self.meta_db,
-            RevertOp::Edited { before },
+            RevertOp::Edited {
+                before,
+                after: after.clone(),
+            },
             clock.now(),
         )?;
         txn.commit()?;
@@ -221,7 +226,10 @@ impl Store {
         }
         tasks::put(&mut txn, self.tasks_db, &after)?;
         let op = match kind {
-            MutateKind::Edit => RevertOp::Edited { before },
+            MutateKind::Edit => RevertOp::Edited {
+                before,
+                after: after.clone(),
+            },
             MutateKind::Delete => RevertOp::Deleted { before },
             MutateKind::Complete => RevertOp::Completed { before },
         };
@@ -275,10 +283,10 @@ impl Store {
 
     fn apply_revert_op(&mut self, op: RevertOp) -> Result<()> {
         match op {
-            RevertOp::Added { id } => {
-                self.hard_delete(id)?;
+            RevertOp::Added { task } => {
+                self.hard_delete(task.id)?;
             }
-            RevertOp::Edited { before } => {
+            RevertOp::Edited { before, .. } => {
                 self.update_task(before)?;
             }
             RevertOp::Deleted { mut before } => {

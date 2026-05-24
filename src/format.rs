@@ -6,16 +6,30 @@ use std::io::IsTerminal;
 
 pub struct RenderOptions {
     pub color: bool,
+    pub markdown: bool,
 }
 
 impl RenderOptions {
     pub fn detect() -> Self {
         let color = std::io::stdout().is_terminal() && std::env::var("NO_COLOR").is_err();
-        Self { color }
+        Self {
+            color,
+            markdown: false,
+        }
     }
 
     pub fn no_color() -> Self {
-        Self { color: false }
+        Self {
+            color: false,
+            markdown: false,
+        }
+    }
+
+    pub fn markdown() -> Self {
+        Self {
+            color: false,
+            markdown: true,
+        }
     }
 }
 
@@ -30,13 +44,22 @@ const DIVIDER_WIDTH: usize = 4 + ID_W + 2 + PRI_W + 2 + TEXT_W + 2 + DUE_W + 2 +
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ListMode {
-    /// Compact view: cap each day at 4 rows and append "+N" on the day header.
+    /// Compact view: at most two day groups (today + next day with tasks), each
+    /// capped at 3 rows.
     Compact,
-    /// Show every task — no per-day limit.
+    /// Show every task — no per-day limit, no day-group cap.
     Full,
 }
 
+/// Maximum day groups shown in compact mode.
+pub const COMPACT_MAX_DAYS: usize = 2;
+/// Maximum rows shown per day in compact mode.
+pub const COMPACT_MAX_PER_DAY: usize = 3;
+
 pub fn format_list(tasks: &[Task], opts: &RenderOptions, mode: ListMode) -> String {
+    if opts.markdown {
+        return format_list_md(tasks, mode);
+    }
     if tasks.is_empty() {
         return "  No tasks.\n".to_string();
     }
@@ -55,11 +78,6 @@ pub fn format_list(tasks: &[Task], opts: &RenderOptions, mode: ListMode) -> Stri
     out.push_str(&styled_divider(opts));
     out.push('\n');
 
-    let mut current_day: Option<NaiveDate> = None;
-    let mut shown_in_day = 0usize;
-    let mut total_in_day = 0usize;
-    let mut day_tasks: Vec<&Task> = Vec::new();
-
     // Pre-group tasks by effective day so overdue active tasks land under "Today".
     let mut groups: Vec<(NaiveDate, Vec<&Task>)> = Vec::new();
     for t in tasks {
@@ -70,26 +88,26 @@ pub fn format_list(tasks: &[Task], opts: &RenderOptions, mode: ListMode) -> Stri
         groups.last_mut().unwrap().1.push(t);
     }
 
-    let _ = (
-        &mut current_day,
-        &mut shown_in_day,
-        &mut total_in_day,
-        &mut day_tasks,
-    );
+    // Compact view: cap day groups (today + next with tasks = 2) and rows per day (3).
+    // No trailing "+N days hidden" footer — the compact view should stay quiet.
+    let visible_groups: Vec<(NaiveDate, Vec<&Task>)> = match mode {
+        ListMode::Compact => groups.into_iter().take(COMPACT_MAX_DAYS).collect(),
+        ListMode::Full => groups,
+    };
 
-    let limit_per_day = match mode {
-        ListMode::Compact => Some(4),
+    let per_day_cap = match mode {
+        ListMode::Compact => Some(COMPACT_MAX_PER_DAY),
         ListMode::Full => None,
     };
 
-    for (i, (day, day_tasks)) in groups.iter().enumerate() {
+    for (i, (day, day_tasks)) in visible_groups.iter().enumerate() {
         if i > 0 {
             out.push('\n');
         }
         let total = day_tasks.len();
-        let show = limit_per_day.map(|l| l.min(total)).unwrap_or(total);
-        let hidden = total - show;
-        out.push_str(&day_header(*day, today, hidden, opts));
+        let show = per_day_cap.map(|cap| cap.min(total)).unwrap_or(total);
+        let hidden_in_day = total - show;
+        out.push_str(&day_header(*day, today, hidden_in_day, opts));
         out.push('\n');
         for t in day_tasks.iter().take(show) {
             out.push_str(&format_list_row(t, now_utc, opts));
@@ -300,6 +318,9 @@ pub fn day_label(day: NaiveDate, today: NaiveDate) -> String {
 }
 
 pub fn format_info(task: &Task, opts: &RenderOptions) -> String {
+    if opts.markdown {
+        return format_info_md(task);
+    }
     let now: DateTime<Utc> = Utc::now();
     let due_local: DateTime<Local> = task.due.into();
     let created_local: DateTime<Local> = task.created_at.into();
@@ -345,7 +366,16 @@ pub fn format_info(task: &Task, opts: &RenderOptions) -> String {
     out
 }
 
-pub fn format_history(entries: &[(u64, HistoryEntry)], _opts: &RenderOptions) -> String {
+pub fn format_history(
+    entries: &[(u64, HistoryEntry)],
+    opts: &RenderOptions,
+    verbose: bool,
+) -> String {
+    if opts.markdown {
+        // Md mode is for agents — always render the verbose summary regardless of
+        // the human-view `verbose` flag.
+        return format_history_md(entries);
+    }
     if entries.is_empty() {
         return "  No history.\n".to_string();
     }
@@ -358,11 +388,237 @@ pub fn format_history(entries: &[(u64, HistoryEntry)], _opts: &RenderOptions) ->
     sorted.sort_by(|a, b| b.0.cmp(&a.0));
     for (id, entry) in sorted {
         let when = format_relative_past(entry.timestamp, now);
-        out.push_str(&format!(
-            "  {:>4}  {:<11}  {}\n",
-            id,
-            when,
+        let summary = if verbose {
+            entry.op.summary_verbose()
+        } else {
             entry.op.summary()
+        };
+        out.push_str(&format!("  {:>4}  {:<11}  {}\n", id, when, summary));
+    }
+    out
+}
+
+fn status_label(status: Status) -> &'static str {
+    match status {
+        Status::Active => "active",
+        Status::Completed => "completed",
+        Status::SoftDeleted => "deleted",
+    }
+}
+
+/// Render tasks as a markdown document grouped by day. Targeted at LLM agents:
+/// stable column order, explicit headings, no ANSI/Unicode decoration, and absolute
+/// timestamps so the agent can reason about dates without needing "now". Unlike the
+/// human view, the agent view spells out *what's hidden* and *how to ask for more* —
+/// agents can't see inline color/spacing cues, so we have to say it in text.
+pub fn format_list_md(tasks: &[Task], mode: ListMode) -> String {
+    let mut out = String::new();
+    if tasks.is_empty() {
+        out.push_str("# Tasks\n\n_No tasks._\n");
+        return out;
+    }
+
+    let today = Local::now().date_naive();
+    let now_utc = Utc::now();
+
+    let mut tasks: Vec<&Task> = tasks.iter().collect();
+    tasks.sort_by_key(|t| sort_key(t, today));
+
+    let mut groups: Vec<(NaiveDate, Vec<&Task>)> = Vec::new();
+    for t in tasks {
+        let day = effective_day(t, today);
+        if groups.last().map(|(d, _)| *d) != Some(day) {
+            groups.push((day, Vec::new()));
+        }
+        groups.last_mut().unwrap().1.push(t);
+    }
+
+    let total_days = groups.len();
+    let total_tasks: usize = groups.iter().map(|(_, t)| t.len()).sum();
+
+    let visible_groups: Vec<(NaiveDate, Vec<&Task>)> = match mode {
+        ListMode::Compact => groups.into_iter().take(COMPACT_MAX_DAYS).collect(),
+        ListMode::Full => groups,
+    };
+    let per_day_cap = match mode {
+        ListMode::Compact => Some(COMPACT_MAX_PER_DAY),
+        ListMode::Full => None,
+    };
+
+    let hidden_days = total_days - visible_groups.len();
+    let mut shown_tasks = 0usize;
+    let mut hidden_within_days = 0usize;
+    for (_, day_tasks) in &visible_groups {
+        let total = day_tasks.len();
+        let show = per_day_cap.map(|cap| cap.min(total)).unwrap_or(total);
+        shown_tasks += show;
+        hidden_within_days += total - show;
+    }
+    let hidden_total = total_tasks - shown_tasks;
+
+    // Heading carries the visible/total counts so an agent can see at a glance
+    // whether anything was truncated, even before scanning the tables.
+    let visible_days = visible_groups.len();
+    if hidden_total > 0 {
+        out.push_str(&format!(
+            "# Tasks ({shown_tasks} shown / {total_tasks} total, {visible_days} of {total_days} day{} visible)\n\n",
+            if total_days == 1 { "" } else { "s" },
+        ));
+    } else {
+        out.push_str(&format!(
+            "# Tasks ({total_tasks} task{}, {total_days} day{})\n\n",
+            if total_tasks == 1 { "" } else { "s" },
+            if total_days == 1 { "" } else { "s" },
+        ));
+    }
+
+    for (day, day_tasks) in &visible_groups {
+        let label = md_day_label(*day, today);
+        let total = day_tasks.len();
+        let show = per_day_cap.map(|cap| cap.min(total)).unwrap_or(total);
+        let hidden_in_day = total - show;
+        let header = if hidden_in_day > 0 {
+            format!("## {label} (+{hidden_in_day} more)")
+        } else {
+            format!("## {label}")
+        };
+        out.push_str(&format!("{header}\n\n"));
+        out.push_str("| ID | Pri | Status | Description | Due | Est |\n");
+        out.push_str("|---:|:---:|:-------|:------------|:----|----:|\n");
+        for t in day_tasks.iter().take(show) {
+            let due_local: DateTime<Local> = t.due.into();
+            let due_rel = format_relative(t.due, now_utc);
+            let text = sanitize_for_md(&t.text);
+            out.push_str(&format!(
+                "| {} | {} | {} | {} | {} ({}) | {} |\n",
+                t.id,
+                t.priority,
+                status_label(t.status),
+                text,
+                due_rel,
+                due_local.format("%Y-%m-%d %H:%M"),
+                format_est(t.est_secs),
+            ));
+        }
+        out.push('\n');
+    }
+
+    // Agent-oriented "what's hidden + how to reach it" footer. Only shown when the
+    // compact view actually elided something, and always paired with the exact
+    // command that reveals the rest.
+    if hidden_days > 0 || hidden_within_days > 0 {
+        let mut bits: Vec<String> = Vec::new();
+        if hidden_within_days > 0 {
+            bits.push(format!(
+                "+{hidden_within_days} task{} hidden within shown days",
+                if hidden_within_days == 1 { "" } else { "s" },
+            ));
+        }
+        if hidden_days > 0 {
+            bits.push(format!(
+                "+{hidden_days} day{} hidden after the shown days",
+                if hidden_days == 1 { "" } else { "s" },
+            ));
+        }
+        out.push_str(&format!("_Truncated: {}._\n", bits.join(", ")));
+        out.push_str(
+            "_To see every active task: `task list --active --format md`. \
+             To include completed and deleted: `task list --all --format md`. \
+             To inspect one task: `task info <ID> --format md`._\n",
+        );
+    }
+
+    out
+}
+
+fn md_day_label(day: NaiveDate, today: NaiveDate) -> String {
+    let prefix = if day == today {
+        "Today"
+    } else if day == today + Duration::days(1) {
+        "Tomorrow"
+    } else if day == today - Duration::days(1) {
+        "Yesterday"
+    } else {
+        ""
+    };
+    if prefix.is_empty() {
+        format!("{} ({})", day.format("%A"), day.format("%Y-%m-%d"))
+    } else {
+        format!("{prefix} ({})", day.format("%Y-%m-%d"))
+    }
+}
+
+/// Markdown is mostly plain text, but pipes and backticks would corrupt our table
+/// cells. Newlines/tabs still collapse so each task is one row.
+fn sanitize_for_md(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '|' => out.push_str("\\|"),
+            '\n' | '\r' | '\t' => out.push(' '),
+            c if (c as u32) < 0x20 => out.push(' '),
+            c if (c as u32) == 0x7f => out.push(' '),
+            c if (0x80..=0x9F).contains(&(c as u32)) => out.push(' '),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+pub fn format_info_md(task: &Task) -> String {
+    let now: DateTime<Utc> = Utc::now();
+    let due_local: DateTime<Local> = task.due.into();
+    let created_local: DateTime<Local> = task.created_at.into();
+    let due_relative = format_relative(task.due, now);
+
+    let mut out = format!(
+        "# Task #{}\n\n- **Text:** {}\n- **Priority:** {}\n- **Status:** {}\n- **Due:** {} ({})\n- **Est:** {}\n- **Created:** {}\n",
+        task.id,
+        sanitize_for_md(&task.text),
+        task.priority,
+        status_label(task.status),
+        due_relative,
+        due_local.format("%Y-%m-%d %H:%M"),
+        format_est(task.est_secs),
+        created_local.format("%Y-%m-%d %H:%M"),
+    );
+    if let Some(t) = task.completed_at {
+        let local: DateTime<Local> = t.into();
+        out.push_str(&format!(
+            "- **Completed:** {}\n",
+            local.format("%Y-%m-%d %H:%M")
+        ));
+    }
+    if let Some(t) = task.deleted_at {
+        let local: DateTime<Local> = t.into();
+        out.push_str(&format!(
+            "- **Deleted:** {}\n",
+            local.format("%Y-%m-%d %H:%M")
+        ));
+    }
+    out
+}
+
+/// Markdown history view, always rendered verbose. The human view treats `-v` as
+/// opt-in to keep the default scan-friendly, but the md view is for LLM agents —
+/// they want the full per-field diff every time, so we hand them
+/// `summary_verbose()` regardless of the flag.
+pub fn format_history_md(entries: &[(u64, HistoryEntry)]) -> String {
+    if entries.is_empty() {
+        return "# History\n\n_No history._\n".to_string();
+    }
+    let mut sorted: Vec<&(u64, HistoryEntry)> = entries.iter().collect();
+    sorted.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut out = String::from("# History\n\n");
+    out.push_str("| ID | When | Event |\n");
+    out.push_str("|---:|:-----|:------|\n");
+    for (id, entry) in sorted {
+        let local: DateTime<Local> = entry.timestamp.into();
+        out.push_str(&format!(
+            "| {} | {} | {} |\n",
+            id,
+            local.format("%Y-%m-%d %H:%M"),
+            sanitize_for_md(&entry.op.summary_verbose()),
         ));
     }
     out
@@ -542,29 +798,316 @@ mod tests {
         assert!(pos_a < pos_b, "expected A-priority before B-priority");
     }
 
+    /// Build a UTC timestamp at noon local time, `day_offset` days from today. Anchoring
+    /// on local-noon dodges DST edge cases and ambiguity around midnight rollover, so the
+    /// test stays stable on any timezone/system clock.
+    fn at_local_noon(day_offset: i64) -> DateTime<Utc> {
+        use chrono::TimeZone;
+        let today = Local::now().date_naive();
+        let target = today + Duration::days(day_offset);
+        let naive = target.and_hms_opt(12, 0, 0).unwrap();
+        Local
+            .from_local_datetime(&naive)
+            .single()
+            .expect("noon is never DST-ambiguous")
+            .with_timezone(&Utc)
+    }
+
     #[test]
-    fn format_list_compact_limits_to_4_per_day_and_shows_plus_n() {
-        // 6 tasks all on same day.
-        let tasks: Vec<Task> = (0..6)
+    fn compact_caps_per_day_to_three_rows() {
+        // Five tasks all on the same future day — compact must show only three and
+        // surface the overflow count on the day header.
+        let day = at_local_noon(2);
+        let tasks: Vec<Task> = (0..5)
+            .map(|i| {
+                let mut t = make_task(
+                    i + 1,
+                    &format!("t{i}"),
+                    Priority::B,
+                    day + Duration::minutes(i as i64),
+                );
+                // Same priority + sequential minutes => stable sort order so t0..t2 are
+                // guaranteed to be the "first three".
+                t.created_at = day;
+                t
+            })
+            .collect();
+        let opts = RenderOptions::no_color();
+        let out = format_list(&tasks, &opts, ListMode::Compact);
+        for i in 0..3 {
+            assert!(out.contains(&format!("t{i}")), "missing t{i} in:\n{out}");
+        }
+        for i in 3..5 {
+            assert!(
+                !out.contains(&format!("t{i}")),
+                "t{i} should be hidden:\n{out}"
+            );
+        }
+        assert!(
+            out.contains("+2"),
+            "expected +2 overflow marker on day header:\n{out}"
+        );
+    }
+
+    #[test]
+    fn compact_caps_apply_independently_to_each_visible_day() {
+        // Two future days, each with five tasks — the per-day cap kicks in twice.
+        let day1 = at_local_noon(1);
+        let day2 = at_local_noon(2);
+        let mut tasks: Vec<Task> = Vec::new();
+        for i in 0..5 {
+            tasks.push(make_task(
+                i + 1,
+                &format!("d1t{i}"),
+                Priority::B,
+                day1 + Duration::minutes(i as i64),
+            ));
+        }
+        for i in 0..5 {
+            tasks.push(make_task(
+                i + 6,
+                &format!("d2t{i}"),
+                Priority::B,
+                day2 + Duration::minutes(i as i64),
+            ));
+        }
+        let opts = RenderOptions::no_color();
+        let out = format_list(&tasks, &opts, ListMode::Compact);
+        for i in 0..3 {
+            assert!(
+                out.contains(&format!("d1t{i}")),
+                "missing d1t{i} in:\n{out}"
+            );
+            assert!(
+                out.contains(&format!("d2t{i}")),
+                "missing d2t{i} in:\n{out}"
+            );
+        }
+        for i in 3..5 {
+            assert!(
+                !out.contains(&format!("d1t{i}")),
+                "d1t{i} should be hidden:\n{out}"
+            );
+            assert!(
+                !out.contains(&format!("d2t{i}")),
+                "d2t{i} should be hidden:\n{out}"
+            );
+        }
+        // Both day headers should carry "+2"; expect at least two occurrences.
+        assert!(
+            out.matches("+2").count() >= 2,
+            "expected an overflow marker on each day header:\n{out}"
+        );
+    }
+
+    #[test]
+    fn compact_with_exactly_three_tasks_shows_no_overflow_marker() {
+        let day = at_local_noon(1);
+        let tasks: Vec<Task> = (0..3)
             .map(|i| {
                 make_task(
                     i + 1,
                     &format!("t{i}"),
                     Priority::B,
-                    base() + Duration::minutes(i as i64),
+                    day + Duration::minutes(i as i64),
                 )
             })
             .collect();
         let opts = RenderOptions::no_color();
         let out = format_list(&tasks, &opts, ListMode::Compact);
-        // Should show 4 tasks
-        assert!(out.contains("t0"));
-        assert!(out.contains("t3"));
-        // 5th and 6th should be hidden
-        assert!(!out.contains("t4"));
-        assert!(!out.contains("t5"));
-        // +2 marker present
-        assert!(out.contains("+2"));
+        for i in 0..3 {
+            assert!(out.contains(&format!("t{i}")), "missing t{i} in:\n{out}");
+        }
+        assert!(
+            !out.contains('+'),
+            "no overflow marker expected when at exactly the cap:\n{out}"
+        );
+    }
+
+    #[test]
+    fn full_mode_never_caps_per_day() {
+        let day = at_local_noon(1);
+        let tasks: Vec<Task> = (0..7)
+            .map(|i| {
+                make_task(
+                    i + 1,
+                    &format!("t{i}"),
+                    Priority::B,
+                    day + Duration::minutes(i as i64),
+                )
+            })
+            .collect();
+        let opts = RenderOptions::no_color();
+        let out = format_list(&tasks, &opts, ListMode::Full);
+        for i in 0..7 {
+            assert!(out.contains(&format!("t{i}")), "missing t{i} in:\n{out}");
+        }
+        assert!(
+            !out.contains('+'),
+            "full mode must not emit an overflow marker:\n{out}"
+        );
+    }
+
+    #[test]
+    fn compact_limits_to_two_day_groups_and_adds_hidden_day_footer() {
+        // Three distinct future days — compact should show two and announce the third.
+        let tasks: Vec<Task> = (1..=3)
+            .map(|i| {
+                make_task(
+                    i as u32,
+                    &format!("t{}", i - 1),
+                    Priority::B,
+                    at_local_noon(i),
+                )
+            })
+            .collect();
+        let opts = RenderOptions::no_color();
+        let out = format_list(&tasks, &opts, ListMode::Compact);
+        assert!(out.contains("t0"), "expected first-day task in:\n{out}");
+        assert!(out.contains("t1"), "expected second-day task in:\n{out}");
+        assert!(!out.contains("t2"), "third day must be hidden in:\n{out}");
+        assert!(
+            !out.contains("more day"),
+            "compact view must not emit a 'more days hidden' footer:\n{out}"
+        );
+    }
+
+    #[test]
+    fn compact_md_caps_per_day_to_three_rows_and_announces_what_is_hidden() {
+        // The md view is for agents — when rows are truncated we must say so in text
+        // (the per-day "(+N more)" chip plus a `_Truncated: ..._` footer) and also
+        // tell the agent which command unhides them.
+        let day = at_local_noon(2);
+        let tasks: Vec<Task> = (0..5)
+            .map(|i| {
+                make_task(
+                    i + 1,
+                    &format!("t{i}"),
+                    Priority::B,
+                    day + Duration::minutes(i as i64),
+                )
+            })
+            .collect();
+        let out = format_list_md(&tasks, ListMode::Compact);
+        for i in 0..3 {
+            assert!(out.contains(&format!("t{i}")), "missing t{i} in:\n{out}");
+        }
+        for i in 3..5 {
+            assert!(
+                !out.contains(&format!("t{i}")),
+                "t{i} should be hidden:\n{out}"
+            );
+        }
+        assert!(
+            out.contains("(+2 more)"),
+            "expected (+2 more) on the markdown day heading in:\n{out}"
+        );
+        assert!(
+            out.contains("+2 tasks hidden within shown days"),
+            "expected per-day overflow disclosure in:\n{out}"
+        );
+        assert!(
+            out.contains("`task list --active --format md`"),
+            "expected an agent-facing command hint in:\n{out}"
+        );
+    }
+
+    #[test]
+    fn compact_md_hides_extra_days_and_calls_them_out_in_the_footer() {
+        // Three distinct future days — compact md shows two and explicitly tells the
+        // agent the third was hidden, plus how to get the rest.
+        let tasks: Vec<Task> = (1..=3)
+            .map(|i| {
+                make_task(
+                    i as u32,
+                    &format!("t{}", i - 1),
+                    Priority::B,
+                    at_local_noon(i),
+                )
+            })
+            .collect();
+        let out = format_list_md(&tasks, ListMode::Compact);
+        assert!(out.contains("t0"), "expected first-day task in:\n{out}");
+        assert!(out.contains("t1"), "expected second-day task in:\n{out}");
+        assert!(!out.contains("t2"), "third day must be hidden in:\n{out}");
+        assert!(
+            out.contains("+1 day hidden after the shown days"),
+            "expected hidden-day disclosure in:\n{out}"
+        );
+        assert!(
+            out.contains("`task list --active --format md`"),
+            "expected agent-facing command hint in:\n{out}"
+        );
+        assert!(
+            out.contains("`task list --all --format md`"),
+            "expected agent-facing command hint for full status set:\n{out}"
+        );
+    }
+
+    #[test]
+    fn full_md_emits_no_truncation_footer() {
+        // Full mode never truncates — no _Truncated_ footer should appear.
+        let day = at_local_noon(1);
+        let tasks: Vec<Task> = (0..5)
+            .map(|i| {
+                make_task(
+                    i + 1,
+                    &format!("t{i}"),
+                    Priority::B,
+                    day + Duration::minutes(i as i64),
+                )
+            })
+            .collect();
+        let out = format_list_md(&tasks, ListMode::Full);
+        assert!(
+            !out.contains("Truncated"),
+            "Full mode must not emit a Truncated footer:\n{out}"
+        );
+        assert!(
+            !out.contains("hidden"),
+            "Full mode must not announce any hidden tasks:\n{out}"
+        );
+    }
+
+    #[test]
+    fn md_heading_includes_visible_and_total_when_truncated() {
+        let day = at_local_noon(2);
+        let tasks: Vec<Task> = (0..5)
+            .map(|i| {
+                make_task(
+                    i + 1,
+                    &format!("t{i}"),
+                    Priority::B,
+                    day + Duration::minutes(i as i64),
+                )
+            })
+            .collect();
+        let out = format_list_md(&tasks, ListMode::Compact);
+        assert!(
+            out.contains("3 shown / 5 total"),
+            "heading should disclose visible / total counts:\n{out}"
+        );
+    }
+
+    #[test]
+    fn md_heading_omits_visible_total_when_nothing_hidden() {
+        let day = at_local_noon(1);
+        let tasks: Vec<Task> = (0..2)
+            .map(|i| {
+                make_task(
+                    i + 1,
+                    &format!("t{i}"),
+                    Priority::B,
+                    day + Duration::minutes(i as i64),
+                )
+            })
+            .collect();
+        let out = format_list_md(&tasks, ListMode::Compact);
+        assert!(
+            !out.contains("shown /"),
+            "heading should be unambiguous when nothing is hidden:\n{out}"
+        );
+        assert!(out.contains("# Tasks"), "still has the top heading:\n{out}");
     }
 
     #[test]
@@ -686,7 +1229,7 @@ mod tests {
     #[test]
     fn format_history_empty_returns_no_history() {
         let opts = RenderOptions::no_color();
-        let out = format_history(&[], &opts);
+        let out = format_history(&[], &opts, false);
         assert!(out.contains("No history"));
     }
 
@@ -742,5 +1285,129 @@ mod tests {
             row.contains('✓'),
             "row should carry a completed marker: {row}"
         );
+    }
+
+    #[test]
+    fn format_list_md_empty_renders_no_tasks_message() {
+        let out = format_list_md(&[], ListMode::Full);
+        assert!(out.starts_with("# Tasks"));
+        assert!(out.contains("_No tasks._"));
+    }
+
+    #[test]
+    fn format_list_md_emits_table_with_columns() {
+        let now = Utc::now();
+        let task = make_task(1, "Buy milk", Priority::A, now + Duration::hours(2));
+        let out = format_list_md(&[task], ListMode::Full);
+        assert!(out.contains("| ID | Pri | Status | Description | Due | Est |"));
+        assert!(out.contains("|---:|:---:|:-------|:------------|:----|----:|"));
+        assert!(out.contains("Buy milk"));
+        assert!(out.contains("| A |"));
+        assert!(out.contains("active"));
+    }
+
+    #[test]
+    fn format_list_md_escapes_pipe_in_text() {
+        let now = Utc::now();
+        let task = make_task(1, "a | b", Priority::B, now + Duration::hours(1));
+        let out = format_list_md(&[task], ListMode::Full);
+        assert!(
+            out.contains(r"a \| b"),
+            "pipes in text must be escaped: {out}"
+        );
+    }
+
+    #[test]
+    fn format_list_md_compact_hides_extra_days_and_discloses_in_footer() {
+        // Mirror of the compact_md test above; kept distinct because earlier tests
+        // anchored on `Utc::now()` rather than `at_local_noon` so removing it would
+        // lose coverage of that path. md mode is for agents, so the truncation must
+        // be announced rather than silent.
+        let now = Utc::now();
+        let tasks: Vec<Task> = (0..3)
+            .map(|i| {
+                make_task(
+                    i + 1,
+                    &format!("t{i}"),
+                    Priority::B,
+                    now + Duration::days(i as i64 + 1),
+                )
+            })
+            .collect();
+        let out = format_list_md(&tasks, ListMode::Compact);
+        assert!(out.contains("t0"));
+        assert!(out.contains("t1"));
+        assert!(!out.contains("t2"));
+        assert!(
+            out.contains("day hidden") || out.contains("days hidden"),
+            "footer must announce the hidden day:\n{out}"
+        );
+        assert!(
+            out.contains("`task list --active --format md`"),
+            "footer must point at the unhiding command:\n{out}"
+        );
+    }
+
+    #[test]
+    fn format_info_md_emits_markdown_heading_and_bullets() {
+        let now = Utc::now();
+        let task = make_task(7, "Read book", Priority::A, now + Duration::hours(2));
+        let out = format_info_md(&task);
+        assert!(out.starts_with("# Task #7"));
+        assert!(out.contains("- **Text:** Read book"));
+        assert!(out.contains("- **Priority:** A"));
+        assert!(out.contains("- **Status:** active"));
+    }
+
+    #[test]
+    fn format_history_md_empty_returns_no_history_section() {
+        let out = format_history_md(&[]);
+        assert!(out.contains("# History"));
+        assert!(out.contains("_No history._"));
+    }
+
+    #[test]
+    fn format_history_md_emits_table() {
+        let now = Utc::now();
+        let task = make_task(1, "first", Priority::B, now);
+        let entries = vec![(
+            5,
+            HistoryEntry {
+                op: crate::store::revert::RevertOp::Added { task },
+                timestamp: now,
+            },
+        )];
+        let out = format_history_md(&entries);
+        assert!(out.contains("| ID | When | Event |"));
+        assert!(out.contains("| 5 |"));
+        assert!(out.contains("added #1"));
+    }
+
+    #[test]
+    fn format_history_md_always_renders_verbose_diff_for_edits() {
+        // Md mode is always verbose — agents want the full diff every time.
+        let now = Utc::now();
+        let before = make_task(1, "before", Priority::B, now);
+        let mut after = before.clone();
+        after.text = "after".into();
+        let entries = vec![(
+            5,
+            HistoryEntry {
+                op: crate::store::revert::RevertOp::Edited { before, after },
+                timestamp: now,
+            },
+        )];
+        let out = format_history_md(&entries);
+        assert!(
+            out.contains("text \\\"before\\\"→\\\"after\\\"")
+                || out.contains("text \"before\"→\"after\""),
+            "md history must include the old→new text diff: {out}"
+        );
+    }
+
+    #[test]
+    fn sanitize_for_md_escapes_pipes_and_strips_controls() {
+        let s = sanitize_for_md("a|b\tc\nd\x1be");
+        assert_eq!(s, "a\\|b c d e");
     }
 }

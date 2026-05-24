@@ -4,9 +4,9 @@ use crate::format::{format_history, RenderOptions};
 use crate::store::revert::{HistoryEntry, RevertOp};
 use crate::store::Store;
 
-pub fn list(store: &Store, opts: &RenderOptions) -> Result<String> {
+pub fn list(store: &Store, opts: &RenderOptions, verbose: bool) -> Result<String> {
     let entries = store.history()?;
-    Ok(format_history(&entries, opts))
+    Ok(format_history(&entries, opts, verbose))
 }
 
 /// Result of a cascade revert: every event that was rolled back, newest first.
@@ -32,7 +32,10 @@ pub fn revert(
 
     let mut summaries = Vec::with_capacity(cascade.len());
     for (id, entry) in &cascade {
-        let summary = entry.op.summary();
+        // The revert prompt and the "Reverted event #N: ..." message both want full
+        // diffs — the user is acting on / acknowledging the change, so the extra
+        // detail is worth the line length.
+        let summary = entry.op.summary_verbose();
         store.history_revert(*id)?;
         summaries.push((*id, summary));
     }
@@ -70,8 +73,8 @@ pub fn collect_cascade(store: &Store, from_id: u64) -> Result<Vec<(u64, HistoryE
             continue;
         }
         if id != from_id {
-            if let RevertOp::Added { id: added_id } = entry.op {
-                if added_id == target_task_id {
+            if let RevertOp::Added { task: ref added } = entry.op {
+                if added.id == target_task_id {
                     // New incarnation starts here — stop collecting.
                     break;
                 }
@@ -86,7 +89,7 @@ pub fn collect_cascade(store: &Store, from_id: u64) -> Result<Vec<(u64, HistoryE
 fn confirm_message(cascade: &[(u64, HistoryEntry)]) -> String {
     if cascade.len() == 1 {
         let (id, e) = &cascade[0];
-        return format!("Revert event #{id} ({})?", e.op.summary());
+        return format!("Revert event #{id} ({})?", e.op.summary_verbose());
     }
     // All entries in the cascade share the same task id by construction.
     let task_id = cascade.first().map(|(_, e)| e.op.task_id()).unwrap_or(0);
@@ -96,7 +99,7 @@ fn confirm_message(cascade: &[(u64, HistoryEntry)]) -> String {
         cascade.len()
     );
     for (id, e) in cascade {
-        msg.push_str(&format!("  #{id}  {}\n", e.op.summary()));
+        msg.push_str(&format!("  #{id}  {}\n", e.op.summary_verbose()));
     }
     msg.push_str("Continue?");
     msg
@@ -211,7 +214,7 @@ mod tests {
         // Find the add-of-#1 event.
         let target_id = entries
             .iter()
-            .find(|(_, e)| matches!(e.op, crate::store::revert::RevertOp::Added { id: 1 }))
+            .find(|(_, e)| matches!(&e.op, crate::store::revert::RevertOp::Added { task } if task.id == 1))
             .map(|(id, _)| *id)
             .expect("add-of-#1 event should exist");
 
@@ -228,7 +231,7 @@ mod tests {
     #[test]
     fn confirm_message_single_event_is_concise() {
         let entry = HistoryEntry {
-            op: crate::store::revert::RevertOp::Added { id: 5 },
+            op: crate::store::revert::RevertOp::Added { task: make_task(5) },
             timestamp: Utc::now(),
         };
         let msg = confirm_message(&[(7, entry)]);
@@ -270,7 +273,7 @@ mod tests {
         let entries = store.history().unwrap();
         let first_added_id = entries
             .iter()
-            .find(|(_, e)| matches!(e.op, crate::store::revert::RevertOp::Added { id: 1 }))
+            .find(|(_, e)| matches!(&e.op, crate::store::revert::RevertOp::Added { task } if task.id == 1))
             .map(|(id, _)| *id)
             .expect("first add-of-#1 should be in history");
 
@@ -303,6 +306,7 @@ mod tests {
                 HistoryEntry {
                     op: crate::store::revert::RevertOp::Edited {
                         before: make_task(1),
+                        after: make_task(1),
                     },
                     timestamp: now,
                 },
@@ -310,7 +314,7 @@ mod tests {
             (
                 7,
                 HistoryEntry {
-                    op: crate::store::revert::RevertOp::Added { id: 1 },
+                    op: crate::store::revert::RevertOp::Added { task: make_task(1) },
                     timestamp: now,
                 },
             ),
