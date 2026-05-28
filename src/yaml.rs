@@ -1,14 +1,13 @@
 use crate::error::{Error, Result};
-use crate::model::{Priority, Task};
+use crate::model::{Category, Task};
 use crate::time::parse_duration;
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 struct TaskYaml {
     text: String,
-    priority: String,
-    due: DateTime<Utc>,
+    category: String,
+    ord: u32,
     est: String,
 }
 
@@ -16,19 +15,18 @@ pub fn to_yaml(task: &Task) -> Result<String> {
     let est = format_est(task.est_secs);
     let body = TaskYaml {
         text: task.text.clone(),
-        priority: task.priority.to_string(),
-        due: task.due,
+        category: task.category.to_string(),
+        ord: task.ord,
         est,
     };
     let yaml = serde_yml::to_string(&body)?;
     let id = task.id;
     Ok(format!(
-        "# Task #{id} — edit and save to apply. Comments are ignored.\n# priority: A | B | C\n# est accepts: 10m, 1h, 30s, etc.\n{yaml}"
+        "# Task #{id} — edit and save to apply. Comments are ignored.\n# category: A | B | C\n# est accepts: 10m, 1h, 30s, etc.\n{yaml}"
     ))
 }
 
 pub fn from_yaml(s: &str, task: &Task) -> Result<Task> {
-    // Strip comment lines
     let stripped: String = s
         .lines()
         .filter(|l| !l.trim_start().starts_with('#'))
@@ -37,8 +35,8 @@ pub fn from_yaml(s: &str, task: &Task) -> Result<Task> {
 
     let parsed: TaskYaml = serde_yml::from_str(&stripped)?;
 
-    let priority: Priority = parsed
-        .priority
+    let category: Category = parsed
+        .category
         .parse()
         .map_err(|e: String| Error::Parse(e))?;
 
@@ -48,8 +46,8 @@ pub fn from_yaml(s: &str, task: &Task) -> Result<Task> {
 
     let mut updated = task.clone();
     updated.text = parsed.text;
-    updated.priority = priority;
-    updated.due = parsed.due;
+    updated.category = category;
+    updated.ord = parsed.ord;
     updated.est_secs = est_secs;
     Ok(updated)
 }
@@ -67,17 +65,20 @@ fn format_est(secs: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Priority, Status};
+    use crate::model::{Category, Status};
+    use chrono::Utc;
 
     fn make_task() -> Task {
+        let now = Utc::now();
         Task {
             id: 42,
             text: "Buy milk".to_string(),
-            priority: Priority::B,
-            due: Utc::now(),
+            category: Category::B,
+            ord: 3,
             est_secs: 1800,
             status: Status::Active,
-            created_at: Utc::now(),
+            created_at: now,
+            updated_at: now,
             completed_at: None,
             deleted_at: None,
         }
@@ -89,7 +90,8 @@ mod tests {
         let yaml = to_yaml(&task).unwrap();
         let parsed = from_yaml(&yaml, &task).unwrap();
         assert_eq!(parsed.text, task.text);
-        assert_eq!(parsed.priority, task.priority);
+        assert_eq!(parsed.category, task.category);
+        assert_eq!(parsed.ord, task.ord);
         assert_eq!(parsed.est_secs, task.est_secs);
     }
 
@@ -97,7 +99,6 @@ mod tests {
     fn comments_are_stripped_before_parse() {
         let task = make_task();
         let yaml = to_yaml(&task).unwrap();
-        // Should not error on comment lines
         assert!(from_yaml(&yaml, &task).is_ok());
     }
 

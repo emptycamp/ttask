@@ -52,7 +52,10 @@ fn delete_nonexistent_task_fails() {
 #[test]
 fn complete_marks_task_as_done() {
     let scope = StoreScope::new();
-    task(&scope).args(["add", "Finish report"]).assert().success();
+    task(&scope)
+        .args(["add", "Finish report"])
+        .assert()
+        .success();
     task(&scope).args(["complete", "1"]).assert().success();
     task(&scope)
         .args(["list", "--done"])

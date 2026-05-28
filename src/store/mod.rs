@@ -1,7 +1,9 @@
 pub mod codec;
 pub mod gc;
+pub mod order;
 pub mod revert;
 pub mod tasks;
+pub mod workdays;
 
 use crate::clock::Clock;
 use crate::error::{Error, Result};
@@ -25,6 +27,14 @@ pub struct ClearStats {
     pub events_cleared: u32,
 }
 
+/// Which kind of history event to record for a `mutate_task` call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MutateKind {
+    Edit,
+    Delete,
+    Complete,
+}
+
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         std::fs::create_dir_all(path).map_err(Error::Io)?;
@@ -37,11 +47,11 @@ impl Store {
         };
 
         let mut txn = env.write_txn()?;
-        let tasks_db = env.create_database(&mut txn, Some("tasks"))?;
-        // Named "history" (not "revert") to keep the new schema separate from any
-        // legacy RevertOp-encoded entries left over from an earlier version. Old data
-        // in "revert" is left in place but ignored.
-        let revert_db = env.create_database(&mut txn, Some("history"))?;
+        // DB names bump every time `Task` gains/loses a serialized field, since
+        // bincode is schema-intolerant and old rows wouldn't decode. Leave old
+        // data on disk, open a fresh DB. v4 was added when `updated_at` joined.
+        let tasks_db = env.create_database(&mut txn, Some("tasks_v4"))?;
+        let revert_db = env.create_database(&mut txn, Some("history_v5"))?;
         let meta_db = env.create_database(&mut txn, Some("meta"))?;
         txn.commit()?;
 
@@ -88,7 +98,28 @@ impl Store {
             &mut txn,
             self.revert_db,
             self.meta_db,
-            RevertOp::Added { id: task.id },
+            RevertOp::Added { task: task.clone() },
+            clock.now(),
+        )?;
+        txn.commit()?;
+        Ok(task)
+    }
+
+    /// Allocate a new task ID and insert the task in a single write transaction.
+    pub fn add_task_atomic<F>(&mut self, build: F, clock: &dyn Clock) -> Result<Task>
+    where
+        F: FnOnce(TaskId, u32) -> Task,
+    {
+        let mut txn = self.env.write_txn()?;
+        let id = tasks::next_id(&txn, self.tasks_db)?;
+        let next_ord = tasks::next_active_ord(&txn, self.tasks_db)?;
+        let task = build(id, next_ord);
+        tasks::put(&mut txn, self.tasks_db, &task)?;
+        revert::push(
+            &mut txn,
+            self.revert_db,
+            self.meta_db,
+            RevertOp::Added { task: task.clone() },
             clock.now(),
         )?;
         txn.commit()?;
@@ -98,6 +129,11 @@ impl Store {
     pub fn next_id(&self) -> Result<TaskId> {
         let txn = self.env.read_txn()?;
         tasks::next_id(&txn, self.tasks_db)
+    }
+
+    pub fn next_active_ord(&self) -> Result<u32> {
+        let txn = self.env.read_txn()?;
+        tasks::next_active_ord(&txn, self.tasks_db)
     }
 
     pub fn update_task(&mut self, task: Task) -> Result<()> {
@@ -119,7 +155,10 @@ impl Store {
             &mut txn,
             self.revert_db,
             self.meta_db,
-            RevertOp::Edited { before },
+            RevertOp::Edited {
+                before,
+                after: after.clone(),
+            },
             clock.now(),
         )?;
         txn.commit()?;
@@ -164,6 +203,46 @@ impl Store {
         Ok(())
     }
 
+    /// Atomic read-modify-write. Reads the current task inside a write transaction,
+    /// invokes `modify` to produce the new state, then writes the new state and pushes
+    /// a history event — all in the same transaction.
+    pub fn mutate_task<F>(
+        &mut self,
+        id: TaskId,
+        kind: MutateKind,
+        modify: F,
+        clock: &dyn Clock,
+    ) -> Result<Task>
+    where
+        F: FnOnce(&Task) -> Result<Task>,
+    {
+        let mut txn = self.env.write_txn()?;
+        let before = tasks::get(&txn, self.tasks_db, id)?;
+        let mut after = modify(&before)?;
+        if after == before {
+            return Ok(after);
+        }
+        // Edits refresh `updated_at` so the GC stale-clock restarts on user
+        // touch. Status transitions (Complete/Delete) keep the previous
+        // `updated_at` — the relevant clock from there on is `completed_at` /
+        // `deleted_at`, which the caller has already set on `after`.
+        if matches!(kind, MutateKind::Edit) {
+            after.updated_at = clock.now();
+        }
+        tasks::put(&mut txn, self.tasks_db, &after)?;
+        let op = match kind {
+            MutateKind::Edit => RevertOp::Edited {
+                before,
+                after: after.clone(),
+            },
+            MutateKind::Delete => RevertOp::Deleted { before },
+            MutateKind::Complete => RevertOp::Completed { before },
+        };
+        revert::push(&mut txn, self.revert_db, self.meta_db, op, clock.now())?;
+        txn.commit()?;
+        Ok(after)
+    }
+
     pub fn hard_delete(&mut self, id: TaskId) -> Result<()> {
         let mut txn = self.env.write_txn()?;
         tasks::delete(&mut txn, self.tasks_db, id)?;
@@ -187,6 +266,58 @@ impl Store {
         })
     }
 
+    /// Move `id` to manual order position `target_ord` (1-based), shifting other
+    /// active tasks to make room. No-op if `target_ord` is the task's current ord.
+    pub fn reorder_task(&mut self, id: TaskId, target_ord: u32, clock: &dyn Clock) -> Result<()> {
+        let before = self.get_task(id)?;
+        if before.ord == target_ord {
+            return Ok(());
+        }
+        let mut active: Vec<Task> = self
+            .all_tasks()?
+            .into_iter()
+            .filter(|t| t.status == crate::model::Status::Active)
+            .collect();
+        active.sort_by_key(|t| t.ord);
+
+        let new_orders = order::compute_reorder(&active, id, target_ord);
+
+        let now = clock.now();
+        let mut txn = self.env.write_txn()?;
+        // Apply the bulk shifts directly — no history events for the bystanders,
+        // since the user only triggered a single move. Record one edit event for
+        // the moved task so the history log reflects the user-facing change. The
+        // moved task also gets a fresh `updated_at` (it's an intentional user
+        // action); shifted bystanders don't, so they don't stay alive forever
+        // just because something nearby was reordered.
+        for t in active.iter() {
+            if let Some(new_ord) = new_orders.get(&t.id).copied() {
+                if t.id == id {
+                    let mut after = t.clone();
+                    after.ord = new_ord;
+                    after.updated_at = now;
+                    tasks::put(&mut txn, self.tasks_db, &after)?;
+                    revert::push(
+                        &mut txn,
+                        self.revert_db,
+                        self.meta_db,
+                        RevertOp::Edited {
+                            before: t.clone(),
+                            after,
+                        },
+                        now,
+                    )?;
+                } else if new_ord != t.ord {
+                    let mut updated = t.clone();
+                    updated.ord = new_ord;
+                    tasks::put(&mut txn, self.tasks_db, &updated)?;
+                }
+            }
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
     pub fn history(&self) -> Result<Vec<(u64, HistoryEntry)>> {
         let txn = self.env.read_txn()?;
         revert::list(&txn, self.revert_db)
@@ -198,9 +329,7 @@ impl Store {
     }
 
     pub fn history_revert(&mut self, id: u64) -> Result<()> {
-        let entry = self
-            .history_get(id)?
-            .ok_or(Error::HistoryNotFound(id))?;
+        let entry = self.history_get(id)?.ok_or(Error::HistoryNotFound(id))?;
         let op = entry.op.clone();
         self.apply_revert_op(op)?;
         let mut txn = self.env.write_txn()?;
@@ -211,10 +340,10 @@ impl Store {
 
     fn apply_revert_op(&mut self, op: RevertOp) -> Result<()> {
         match op {
-            RevertOp::Added { id } => {
-                self.hard_delete(id)?;
+            RevertOp::Added { task } => {
+                self.hard_delete(task.id)?;
             }
-            RevertOp::Edited { before } => {
+            RevertOp::Edited { before, .. } => {
                 self.update_task(before)?;
             }
             RevertOp::Deleted { mut before } => {

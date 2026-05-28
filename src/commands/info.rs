@@ -11,19 +11,21 @@ pub fn run(id: TaskId, store: &Store, opts: &RenderOptions) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Priority, Status, Task};
+    use crate::model::{Category, Status, Task};
     use chrono::Utc;
     use tempfile::tempdir;
 
     fn make_task(id: u32) -> Task {
+        let now = Utc::now();
         Task {
             id,
             text: format!("task {id}"),
-            priority: Priority::B,
-            due: Utc::now(),
+            category: Category::B,
+            ord: id,
             est_secs: 1800,
             status: Status::Active,
-            created_at: Utc::now(),
+            created_at: now,
+            updated_at: now,
             completed_at: None,
             deleted_at: None,
         }

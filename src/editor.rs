@@ -35,18 +35,19 @@ impl TaskEditor for BuiltinEditor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Priority, Status};
+    use crate::model::{Category, Status};
     use chrono::Utc;
 
     fn make_task() -> Task {
         Task {
             id: 1,
             text: "old text".to_string(),
-            priority: Priority::B,
-            due: Utc::now(),
+            category: Category::B,
+            ord: 1,
             est_secs: 1800,
             status: Status::Active,
             created_at: Utc::now(),
+            updated_at: Utc::now(),
             completed_at: None,
             deleted_at: None,
         }
@@ -57,7 +58,7 @@ mod tests {
         let task = make_task();
         std::env::set_var(
             "TASK_EDIT_YAML",
-            "text: new text\npriority: A\ndue: 2026-06-01T09:00:00Z\nest: 15m\n",
+            "text: new text\ncategory: A\nord: 1\nest: 15m\n",
         );
         let mut saved: Option<Task> = None;
         BuiltinEditor
@@ -69,7 +70,7 @@ mod tests {
         std::env::remove_var("TASK_EDIT_YAML");
         let saved = saved.expect("save closure should have been called");
         assert_eq!(saved.text, "new text");
-        assert_eq!(saved.priority, Priority::A);
+        assert_eq!(saved.category, Category::A);
     }
 
     #[test]

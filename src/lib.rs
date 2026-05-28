@@ -6,6 +6,7 @@ pub mod editor;
 pub mod error;
 pub mod form_editor;
 pub mod format;
+pub mod help_md;
 pub mod history_tui;
 pub mod model;
 pub mod store;

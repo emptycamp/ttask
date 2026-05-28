@@ -30,7 +30,7 @@ fn clear_with_yes_wipes_tasks_and_history() {
         .success()
         .stdout(contains("No tasks"));
     task(&scope)
-        .args(["history", "--list"])
+        .args(["history", "list"])
         .assert()
         .success()
         .stdout(contains("No history"));

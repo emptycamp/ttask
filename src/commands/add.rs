@@ -1,53 +1,72 @@
 use crate::clock::Clock;
 use crate::error::{Error, Result};
-use crate::model::{Priority, Status, Task};
+use crate::model::{Category, Status, Task};
+use crate::store::order;
 use crate::store::Store;
-use crate::time::{parse_due, parse_duration};
-use chrono::Local;
+use crate::time::parse_fields::{parse_task_fields, ParsedFields};
 
 pub fn run(args: &[String], store: &mut Store, clock: &dyn Clock) -> Result<Task> {
     let now_utc = clock.now();
-    let now_local: chrono::DateTime<Local> = now_utc.into();
 
-    let mut text_parts: Vec<String> = Vec::new();
-    let mut priority = Priority::B;
-    let mut due = now_utc + chrono::Duration::minutes(5);
-    let mut est_secs: i64 = 1800;
+    let ParsedFields {
+        text,
+        category,
+        ord,
+        est_secs,
+    } = parse_task_fields(args)?;
 
-    for arg in args {
-        if let Some(rest) = arg.strip_prefix("p:") {
-            priority = rest
-                .parse()
-                .map_err(|e: String| Error::Parse(e))?;
-        } else if let Some(rest) = arg.strip_prefix("due:") {
-            due = parse_due(rest, now_local)?.with_timezone(&chrono::Utc);
-        } else if let Some(rest) = arg.strip_prefix("est:") {
-            est_secs = parse_duration(rest)?.num_seconds();
-        } else {
-            text_parts.push(arg.clone());
+    let text = text.ok_or_else(|| Error::Parse("task text is required".into()))?;
+    let category = category.unwrap_or(Category::B);
+    let est_secs = est_secs.unwrap_or(1800);
+
+    // Snapshot the active tasks *before* the add so we can splice the new one in at
+    // the requested ord, shifting the bystanders. Without an explicit ord the task
+    // is appended to the end.
+    let active_before: Vec<Task> = store
+        .all_tasks()?
+        .into_iter()
+        .filter(|t| t.status == Status::Active)
+        .collect();
+    let next_default_ord = store.next_active_ord()?;
+    let requested_ord = ord.unwrap_or(next_default_ord);
+
+    let created = store.add_task_atomic(
+        |id, _| Task {
+            id,
+            text,
+            category,
+            ord: requested_ord,
+            est_secs,
+            status: Status::Active,
+            created_at: now_utc,
+            updated_at: now_utc,
+            completed_at: None,
+            deleted_at: None,
+        },
+        clock,
+    )?;
+
+    if ord.is_some() {
+        // Shift the bystanders so the new task lands exactly at requested_ord. The
+        // `compute_reorder` helper takes the full new task set sorted by current
+        // ord — the new task is currently at `requested_ord`, possibly colliding
+        // with an existing task at that ord.
+        let mut active: Vec<Task> = active_before;
+        active.push(created.clone());
+        active.sort_by_key(|t| (t.ord, t.id));
+        let new_orders = order::compute_reorder(&active, created.id, requested_ord);
+        for t in active {
+            if let Some(&new_ord) = new_orders.get(&t.id) {
+                if new_ord != t.ord {
+                    let mut updated = t.clone();
+                    updated.ord = new_ord;
+                    store.update_task(updated)?;
+                }
+            }
         }
     }
 
-    if text_parts.is_empty() {
-        return Err(Error::Parse("task text is required".into()));
-    }
-
-    let text = text_parts.join(" ");
-    let id = store.next_id()?;
-
-    let task = Task {
-        id,
-        text,
-        priority,
-        due,
-        est_secs,
-        status: Status::Active,
-        created_at: now_utc,
-        completed_at: None,
-        deleted_at: None,
-    };
-
-    store.add_task_with_revert(task, clock)
+    store.get_task(created.id)
 }
 
 #[cfg(test)]
@@ -73,18 +92,19 @@ mod tests {
         let args: Vec<String> = vec!["Buy milk".into()];
         let task = run(&args, &mut store, &clock).unwrap();
         assert_eq!(task.text, "Buy milk");
-        assert_eq!(task.priority, Priority::B);
+        assert_eq!(task.category, Category::B);
         assert_eq!(task.id, 1);
+        assert_eq!(task.ord, 1);
     }
 
     #[test]
-    fn add_task_with_priority() {
+    fn add_task_with_category() {
         let dir = tempdir().unwrap();
         let mut store = open_store(dir.path());
         let clock = make_clock();
         let args: Vec<String> = vec!["Read book".into(), "p:a".into()];
         let task = run(&args, &mut store, &clock).unwrap();
-        assert_eq!(task.priority, Priority::A);
+        assert_eq!(task.category, Category::A);
     }
 
     #[test]
@@ -115,5 +135,23 @@ mod tests {
         let t2 = run(&["Task two".to_string()], &mut store, &clock).unwrap();
         assert_eq!(t1.id, 1);
         assert_eq!(t2.id, 2);
+        assert_eq!(t1.ord, 1);
+        assert_eq!(t2.ord, 2);
+    }
+
+    #[test]
+    fn add_with_ord_inserts_at_position_and_shifts_others() {
+        let dir = tempdir().unwrap();
+        let mut store = open_store(dir.path());
+        let clock = make_clock();
+        let t1 = run(&["one".into()], &mut store, &clock).unwrap();
+        let t2 = run(&["two".into()], &mut store, &clock).unwrap();
+        // Insert the new task at ord=1; existing ords shift down.
+        let new = run(&["new".into(), "ord:1".into()], &mut store, &clock).unwrap();
+        assert_eq!(new.ord, 1);
+        let t1_after = store.get_task(t1.id).unwrap();
+        let t2_after = store.get_task(t2.id).unwrap();
+        assert_eq!(t1_after.ord, 2);
+        assert_eq!(t2_after.ord, 3);
     }
 }

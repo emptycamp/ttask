@@ -1,14 +1,12 @@
-use crate::format::effective_day;
-use crate::model::{Priority, TaskId};
+use crate::model::{Category, TaskId};
 use crate::tui::App;
-use chrono::Local;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum PendingChange {
     ToggleComplete(TaskId),
     ToggleDelete(TaskId),
-    SetPriority(TaskId, Priority),
+    SetCategory(TaskId, Category),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -17,62 +15,88 @@ pub enum Action {
     Quit,
     EditTask(TaskId),
     AddTask,
+    /// User typed a 1-9 digit: move the cursor task to that 1-based position.
+    ReorderCursor(u32),
 }
 
 pub fn handle(app: &mut App, key: KeyEvent) -> Action {
+    if app.search_input.is_some() {
+        return handle_search_input(app, key);
+    }
+    handle_normal(app, key)
+}
+
+fn handle_normal(app: &mut App, key: KeyEvent) -> Action {
+    let visible = app.filtered_tasks();
+    let visible_len = visible.len();
+    let cursor_id = visible.get(app.cursor).map(|t| t.id);
+    drop(visible);
+
     match (key.code, key.modifiers) {
         (KeyCode::Up, _) => {
             app.cursor = app.cursor.saturating_sub(1);
         }
         (KeyCode::Down, _) => {
-            if app.cursor + 1 < app.tasks.len() {
-                app.cursor += 1;
+            app.cursor = (app.cursor + 1).min(visible_len.saturating_sub(1));
+        }
+        (KeyCode::Enter, _) => {
+            if let Some(id) = cursor_id {
+                return Action::EditTask(id);
             }
         }
-        (KeyCode::Left, _) => {
-            if let Some(idx) = prev_day_first_task(&app.tasks, app.cursor) {
-                app.cursor = idx;
-            }
-        }
-        (KeyCode::Right, _) => {
-            if let Some(idx) = next_day_first_task(&app.tasks, app.cursor) {
-                app.cursor = idx;
-            }
+        (KeyCode::Char('/'), KeyModifiers::NONE) => {
+            app.search_input = Some(app.search_filter.clone());
+            app.clamp_cursor();
         }
         (KeyCode::Char('a'), KeyModifiers::NONE) => {
             return Action::AddTask;
         }
         (KeyCode::Char('c'), KeyModifiers::NONE) => {
-            if let Some(task) = app.tasks.get(app.cursor) {
-                toggle_change(app, PendingChange::ToggleComplete(task.id));
+            if let Some(id) = cursor_id {
+                toggle_change(app, PendingChange::ToggleComplete(id));
             }
         }
         (KeyCode::Char('d'), KeyModifiers::NONE) => {
-            if let Some(task) = app.tasks.get(app.cursor) {
-                toggle_change(app, PendingChange::ToggleDelete(task.id));
+            if let Some(id) = cursor_id {
+                toggle_change(app, PendingChange::ToggleDelete(id));
             }
         }
-        (KeyCode::Char('e'), KeyModifiers::NONE) | (KeyCode::Enter, _) => {
-            if let Some(task) = app.tasks.get(app.cursor) {
-                return Action::EditTask(task.id);
+        (KeyCode::Char('e'), KeyModifiers::NONE) => {
+            if let Some(id) = cursor_id {
+                return Action::EditTask(id);
             }
         }
         (KeyCode::Char('A'), KeyModifiers::SHIFT) => {
-            if let Some(task) = app.tasks.get(app.cursor) {
-                set_priority(app, task.id, Priority::A);
+            if let Some(id) = cursor_id {
+                set_category(app, id, Category::A);
             }
         }
         (KeyCode::Char('B'), KeyModifiers::SHIFT) => {
-            if let Some(task) = app.tasks.get(app.cursor) {
-                set_priority(app, task.id, Priority::B);
+            if let Some(id) = cursor_id {
+                set_category(app, id, Category::B);
             }
         }
         (KeyCode::Char('C'), KeyModifiers::SHIFT) => {
-            if let Some(task) = app.tasks.get(app.cursor) {
-                set_priority(app, task.id, Priority::C);
+            if let Some(id) = cursor_id {
+                set_category(app, id, Category::C);
             }
         }
-        (KeyCode::Esc, _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+        // 1-9 reorders the cursor task to that 1-based position.
+        (KeyCode::Char(c), KeyModifiers::NONE)
+            if cursor_id.is_some() && c.is_ascii_digit() && c != '0' =>
+        {
+            let n = (c as u32) - ('0' as u32);
+            return Action::ReorderCursor(n);
+        }
+        (KeyCode::Esc, _) => {
+            if !app.search_filter.is_empty() {
+                app.search_filter.clear();
+                app.clamp_cursor();
+            } else {
+                return Action::Quit;
+            }
+        }
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
             return Action::Quit;
         }
         _ => {}
@@ -80,48 +104,52 @@ pub fn handle(app: &mut App, key: KeyEvent) -> Action {
     Action::Continue
 }
 
-/// Find the index of the first task on the day immediately preceding `tasks[cursor]`.
-/// Uses `effective_day` so overdue active tasks share the "Today" group.
-fn prev_day_first_task(tasks: &[crate::model::Task], cursor: usize) -> Option<usize> {
-    if cursor == 0 || tasks.is_empty() {
-        return None;
-    }
-    let today = Local::now().date_naive();
-    let current_day = effective_day(&tasks[cursor], today);
-    let mut i = cursor;
-    while i > 0 {
-        i -= 1;
-        if effective_day(&tasks[i], today) != current_day {
-            let prev_day = effective_day(&tasks[i], today);
-            while i > 0 && effective_day(&tasks[i - 1], today) == prev_day {
-                i -= 1;
+fn handle_search_input(app: &mut App, key: KeyEvent) -> Action {
+    match (key.code, key.modifiers) {
+        (KeyCode::Enter, _) => {
+            if let Some(buf) = app.search_input.take() {
+                app.search_filter = buf;
             }
-            return Some(i);
+            app.clamp_cursor();
         }
-    }
-    None
-}
-
-/// Find the index of the first task on the day immediately following `tasks[cursor]`.
-fn next_day_first_task(tasks: &[crate::model::Task], cursor: usize) -> Option<usize> {
-    if tasks.is_empty() {
-        return None;
-    }
-    let today = Local::now().date_naive();
-    let current_day = effective_day(&tasks[cursor], today);
-    for (i, t) in tasks.iter().enumerate().skip(cursor + 1) {
-        if effective_day(t, today) != current_day {
-            return Some(i);
+        (KeyCode::Esc, _) => {
+            app.search_input = None;
+            app.clamp_cursor();
         }
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+            return Action::Quit;
+        }
+        (KeyCode::Backspace, _) => {
+            if let Some(buf) = app.search_input.as_mut() {
+                buf.pop();
+            }
+            app.clamp_cursor();
+        }
+        (KeyCode::Up, _) => {
+            app.cursor = app.cursor.saturating_sub(1);
+        }
+        (KeyCode::Down, _) => {
+            let len = app.filtered_tasks().len();
+            if app.cursor + 1 < len {
+                app.cursor += 1;
+            }
+        }
+        (KeyCode::Char(c), m) if !m.contains(KeyModifiers::CONTROL) => {
+            if let Some(buf) = app.search_input.as_mut() {
+                buf.push(c);
+            }
+            app.cursor = 0;
+        }
+        _ => {}
     }
-    None
+    Action::Continue
 }
 
 fn toggle_change(app: &mut App, change: PendingChange) {
     let id = match &change {
         PendingChange::ToggleComplete(id) => *id,
         PendingChange::ToggleDelete(id) => *id,
-        PendingChange::SetPriority(id, _) => *id,
+        PendingChange::SetCategory(id, _) => *id,
     };
     let changes = app.pending.entry(id).or_default();
     if let Some(pos) = changes.iter().position(|c| c == &change) {
@@ -131,45 +159,51 @@ fn toggle_change(app: &mut App, change: PendingChange) {
     }
 }
 
-fn set_priority(app: &mut App, id: TaskId, p: Priority) {
+fn set_category(app: &mut App, id: TaskId, p: Category) {
     let changes = app.pending.entry(id).or_default();
-    changes.retain(|c| !matches!(c, PendingChange::SetPriority(_, _)));
-    changes.push(PendingChange::SetPriority(id, p));
+    changes.retain(|c| !matches!(c, PendingChange::SetCategory(_, _)));
+    changes.push(PendingChange::SetCategory(id, p));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Priority, Status, Task};
+    use crate::model::{Category, Status, Task};
     use crate::tui::App;
-    use chrono::{Duration, Utc};
+    use chrono::Utc;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-    fn make_task_due(id: u32, due: chrono::DateTime<Utc>) -> Task {
+    fn make_task(id: u32) -> Task {
+        let now = Utc::now();
         Task {
             id,
             text: format!("task {id}"),
-            priority: Priority::B,
-            due,
+            category: Category::B,
+            ord: id,
             est_secs: 1800,
             status: Status::Active,
-            created_at: Utc::now(),
+            created_at: now,
+            updated_at: now,
             completed_at: None,
             deleted_at: None,
         }
     }
 
-    fn make_task(id: u32) -> Task {
-        make_task_due(id, Utc::now())
+    fn make_app() -> App {
+        App::new(vec![make_task(1), make_task(2)])
     }
 
-    fn make_app() -> App {
-        App {
-            tasks: vec![make_task(1), make_task(2)],
-            cursor: 0,
-            pending: std::collections::HashMap::new(),
-            should_quit: false,
-        }
+    fn make_app_with_text(texts: &[&str]) -> App {
+        let tasks: Vec<Task> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let mut t = make_task((i + 1) as u32);
+                t.text = s.to_string();
+                t
+            })
+            .collect();
+        App::new(tasks)
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -203,55 +237,6 @@ mod tests {
     }
 
     #[test]
-    fn left_jumps_to_first_task_of_previous_day() {
-        let now = Utc::now();
-        let mut app = App {
-            tasks: vec![
-                make_task_due(1, now),
-                make_task_due(2, now),
-                make_task_due(3, now + Duration::days(1)),
-                make_task_due(4, now + Duration::days(1)),
-            ],
-            cursor: 3,
-            pending: std::collections::HashMap::new(),
-            should_quit: false,
-        };
-        handle(&mut app, key(KeyCode::Left));
-        assert_eq!(app.cursor, 0);
-    }
-
-    #[test]
-    fn left_at_first_day_is_noop() {
-        let now = Utc::now();
-        let mut app = App {
-            tasks: vec![make_task_due(1, now), make_task_due(2, now)],
-            cursor: 1,
-            pending: std::collections::HashMap::new(),
-            should_quit: false,
-        };
-        handle(&mut app, key(KeyCode::Left));
-        assert_eq!(app.cursor, 1);
-    }
-
-    #[test]
-    fn right_jumps_to_first_task_of_next_day() {
-        let now = Utc::now();
-        let mut app = App {
-            tasks: vec![
-                make_task_due(1, now),
-                make_task_due(2, now),
-                make_task_due(3, now + Duration::days(1)),
-                make_task_due(4, now + Duration::days(1)),
-            ],
-            cursor: 0,
-            pending: std::collections::HashMap::new(),
-            should_quit: false,
-        };
-        handle(&mut app, key(KeyCode::Right));
-        assert_eq!(app.cursor, 2);
-    }
-
-    #[test]
     fn a_returns_add_action() {
         let mut app = make_app();
         let action = handle(&mut app, key(KeyCode::Char('a')));
@@ -282,25 +267,75 @@ mod tests {
     }
 
     #[test]
-    fn enter_returns_edit_action() {
+    fn enter_with_task_at_cursor_returns_edit_action() {
         let mut app = make_app();
         let action = handle(&mut app, key(KeyCode::Enter));
         assert_eq!(action, Action::EditTask(1));
     }
 
     #[test]
-    fn shift_a_sets_priority_a() {
-        let mut app = make_app();
-        handle(&mut app, shift_key(KeyCode::Char('A')));
-        let changes = app.pending.get(&1).unwrap();
-        assert!(changes.contains(&PendingChange::SetPriority(1, Priority::A)));
+    fn enter_on_empty_list_is_noop() {
+        let mut app = App::new(vec![]);
+        let action = handle(&mut app, key(KeyCode::Enter));
+        assert_eq!(action, Action::Continue);
     }
 
     #[test]
-    fn esc_signals_quit() {
+    fn digit_key_signals_reorder() {
+        let mut app = make_app();
+        let action = handle(&mut app, key(KeyCode::Char('3')));
+        assert_eq!(action, Action::ReorderCursor(3));
+    }
+
+    #[test]
+    fn digit_zero_does_nothing() {
+        let mut app = make_app();
+        let action = handle(&mut app, key(KeyCode::Char('0')));
+        assert_eq!(action, Action::Continue);
+    }
+
+    #[test]
+    fn ctrl_s_is_no_longer_recognized() {
+        let mut app = make_app();
+        let action = handle(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        );
+        assert_eq!(action, Action::Continue);
+    }
+
+    #[test]
+    fn shift_a_sets_category_a() {
+        let mut app = make_app();
+        handle(&mut app, shift_key(KeyCode::Char('A')));
+        let changes = app.pending.get(&1).unwrap();
+        assert!(changes.contains(&PendingChange::SetCategory(1, Category::A)));
+    }
+
+    #[test]
+    fn esc_signals_quit_when_no_filter() {
         let mut app = make_app();
         let action = handle(&mut app, key(KeyCode::Esc));
         assert_eq!(action, Action::Quit);
+    }
+
+    #[test]
+    fn esc_clears_filter_first_then_quits_on_second_press() {
+        let mut app = make_app_with_text(&["Buy milk", "Read book"]);
+        app.search_filter = "milk".into();
+        let a1 = handle(&mut app, key(KeyCode::Esc));
+        assert_eq!(a1, Action::Continue);
+        assert!(app.search_filter.is_empty());
+        assert_eq!(app.filtered_tasks().len(), 2);
+        let a2 = handle(&mut app, key(KeyCode::Esc));
+        assert_eq!(a2, Action::Quit);
+    }
+
+    #[test]
+    fn q_does_not_quit() {
+        let mut app = make_app();
+        let action = handle(&mut app, key(KeyCode::Char('q')));
+        assert_eq!(action, Action::Continue);
     }
 
     #[test]
@@ -311,5 +346,85 @@ mod tests {
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
         );
         assert_eq!(action, Action::Quit);
+    }
+
+    // ── Search mode ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn slash_enters_search_input_mode() {
+        let mut app = make_app();
+        handle(&mut app, key(KeyCode::Char('/')));
+        assert!(app.search_input.is_some());
+        assert_eq!(app.search_input.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn typing_in_search_mode_filters_the_visible_list() {
+        let mut app = make_app_with_text(&["Buy milk", "Read book", "Write blog"]);
+        handle(&mut app, key(KeyCode::Char('/')));
+        for c in "read".chars() {
+            handle(&mut app, key(KeyCode::Char(c)));
+        }
+        let visible = app.filtered_tasks();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].text, "Read book");
+    }
+
+    #[test]
+    fn enter_in_search_mode_commits_filter_and_exits_input() {
+        let mut app = make_app_with_text(&["Buy milk", "Read book"]);
+        handle(&mut app, key(KeyCode::Char('/')));
+        for c in "milk".chars() {
+            handle(&mut app, key(KeyCode::Char(c)));
+        }
+        handle(&mut app, key(KeyCode::Enter));
+        assert!(app.search_input.is_none());
+        assert_eq!(app.search_filter, "milk");
+        assert_eq!(app.filtered_tasks().len(), 1);
+    }
+
+    #[test]
+    fn esc_in_search_mode_cancels_input_and_keeps_prior_filter() {
+        let mut app = make_app_with_text(&["Buy milk", "Read book"]);
+        handle(&mut app, key(KeyCode::Char('/')));
+        for c in "milk".chars() {
+            handle(&mut app, key(KeyCode::Char(c)));
+        }
+        handle(&mut app, key(KeyCode::Enter));
+        assert_eq!(app.search_filter, "milk");
+        handle(&mut app, key(KeyCode::Char('/')));
+        handle(&mut app, key(KeyCode::Backspace));
+        handle(&mut app, key(KeyCode::Esc));
+        assert!(app.search_input.is_none());
+        assert_eq!(app.search_filter, "milk");
+    }
+
+    #[test]
+    fn slash_pre_fills_with_current_filter() {
+        let mut app = make_app_with_text(&["Buy milk"]);
+        app.search_filter = "milk".into();
+        handle(&mut app, key(KeyCode::Char('/')));
+        assert_eq!(app.search_input.as_deref(), Some("milk"));
+    }
+
+    #[test]
+    fn cursor_clamps_when_filter_narrows_the_list() {
+        let mut app = make_app_with_text(&["Buy milk", "Read book", "Write blog"]);
+        app.cursor = 2;
+        handle(&mut app, key(KeyCode::Char('/')));
+        for c in "milk".chars() {
+            handle(&mut app, key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.cursor, 0);
+        assert_eq!(app.filtered_tasks().len(), 1);
+    }
+
+    #[test]
+    fn keys_other_than_text_input_are_inert_in_search_mode() {
+        let mut app = make_app();
+        handle(&mut app, key(KeyCode::Char('/')));
+        let action = handle(&mut app, key(KeyCode::Char('a')));
+        assert_eq!(action, Action::Continue);
+        assert_eq!(app.search_input.as_deref(), Some("a"));
     }
 }

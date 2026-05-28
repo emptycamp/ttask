@@ -12,10 +12,7 @@ impl Prompt for StdinPrompt {
         print!("{msg} [y/N] ");
         io::stdout().flush().map_err(Error::Io)?;
         let mut line = String::new();
-        io::stdin()
-            .lock()
-            .read_line(&mut line)
-            .map_err(Error::Io)?;
+        io::stdin().lock().read_line(&mut line).map_err(Error::Io)?;
         Ok(matches!(line.trim().to_lowercase().as_str(), "y" | "yes"))
     }
 }

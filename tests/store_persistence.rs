@@ -13,7 +13,10 @@ fn task(scope: &StoreScope) -> Command {
 #[test]
 fn tasks_persist_across_invocations() {
     let scope = StoreScope::new();
-    task(&scope).args(["add", "Persistent task"]).assert().success();
+    task(&scope)
+        .args(["add", "Persistent task"])
+        .assert()
+        .success();
     // Second invocation — new process, same data dir
     task(&scope)
         .args(["list"])

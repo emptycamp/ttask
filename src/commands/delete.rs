@@ -1,24 +1,35 @@
 use crate::clock::Clock;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::model::{Status, TaskId};
-use crate::store::Store;
+use crate::store::{MutateKind, Store};
 
 pub fn run(id: TaskId, store: &mut Store, clock: &dyn Clock) -> Result<()> {
-    let before = store.get_task(id)?;
-    if before.status == Status::SoftDeleted {
-        return Ok(());
-    }
-    let mut after = before.clone();
-    after.status = Status::SoftDeleted;
-    after.deleted_at = Some(clock.now());
-    store.soft_delete_task_with_revert(before, after, clock)
+    let now = clock.now();
+    store.mutate_task(
+        id,
+        MutateKind::Delete,
+        |before| match before.status {
+            Status::SoftDeleted => Err(Error::Parse(format!(
+                "task #{} is already deleted",
+                before.id
+            ))),
+            _ => {
+                let mut after = before.clone();
+                after.status = Status::SoftDeleted;
+                after.deleted_at = Some(now);
+                Ok(after)
+            }
+        },
+        clock,
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::clock::FakeClock;
-    use crate::model::{Priority, Status, Task};
+    use crate::model::{Category, Status, Task};
     use chrono::{TimeZone, Utc};
     use tempfile::tempdir;
 
@@ -27,14 +38,16 @@ mod tests {
     }
 
     fn make_task(id: u32) -> Task {
+        let now = Utc::now();
         Task {
             id,
             text: format!("task {id}"),
-            priority: Priority::B,
-            due: Utc::now(),
+            category: Category::B,
+            ord: id,
             est_secs: 1800,
             status: Status::Active,
-            created_at: Utc::now(),
+            created_at: now,
+            updated_at: now,
             completed_at: None,
             deleted_at: None,
         }
@@ -61,7 +74,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_already_deleted_is_noop() {
+    fn delete_already_deleted_returns_error() {
         let dir = tempdir().unwrap();
         let mut store = Store::open(dir.path()).unwrap();
         let mut task = make_task(1);
@@ -69,6 +82,7 @@ mod tests {
         task.deleted_at = Some(Utc::now());
         store.add_task(task).unwrap();
         let clock = make_clock();
-        assert!(run(1, &mut store, &clock).is_ok());
+        let err = run(1, &mut store, &clock).unwrap_err();
+        assert!(format!("{err}").contains("already deleted"));
     }
 }

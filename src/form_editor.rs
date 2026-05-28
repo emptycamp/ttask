@@ -1,24 +1,14 @@
 //! Built-in form-based terminal editor for tasks.
 //!
-//! Four labelled fields (text, priority, due, est), navigable with Tab/↑/↓. Enter
+//! Four labelled fields (text, category, ord, est), navigable with Tab/↑/↓. Enter
 //! advances to the next field. `:` drops into a vim-style command mode where the user
 //! can run `:w`, `:wq`, `:q`, `:q!`. Esc and Ctrl+C are intentionally inert in edit
 //! mode — exiting is explicit (`:q`, `:wq`, `:q!`).
-//!
-//! Other affordances:
-//! - Ctrl+Z / Ctrl+Shift+Z (also Ctrl+Y) undo/redo field edits.
-//! - When you tab into Due or Est the next typed character clears the field first,
-//!   so you can replace its value without backspacing.
-//! - `:w` persists the task immediately via the supplied save callback. After a
-//!   successful save the dirty flag clears and the baseline rolls forward, so a
-//!   subsequent `:q` exits cleanly.
 
 use crate::editor::Saver;
 use crate::error::{Error, Result};
-use crate::format::format_relative;
-use crate::model::{Priority, Task};
-use crate::time::{parse_due, parse_duration};
-use chrono::Local;
+use crate::model::{Category, Task};
+use crate::time::parse_duration;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
@@ -35,17 +25,17 @@ use std::io;
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Field {
     Text,
-    Priority,
-    Due,
+    Category,
+    Ord,
     Est,
 }
 
 impl Field {
     fn next(self) -> Self {
         match self {
-            Self::Text => Self::Priority,
-            Self::Priority => Self::Due,
-            Self::Due => Self::Est,
+            Self::Text => Self::Category,
+            Self::Category => Self::Ord,
+            Self::Ord => Self::Est,
             Self::Est => Self::Text,
         }
     }
@@ -53,9 +43,9 @@ impl Field {
     fn prev(self) -> Self {
         match self {
             Self::Text => Self::Est,
-            Self::Priority => Self::Text,
-            Self::Due => Self::Priority,
-            Self::Est => Self::Due,
+            Self::Category => Self::Text,
+            Self::Ord => Self::Category,
+            Self::Est => Self::Ord,
         }
     }
 }
@@ -69,11 +59,11 @@ pub enum Mode {
 #[derive(Clone, Debug, PartialEq)]
 struct Snapshot {
     text: String,
-    priority: Priority,
-    due_str: String,
+    category: Category,
+    ord_str: String,
     est_str: String,
     text_cursor: usize,
-    due_cursor: usize,
+    ord_cursor: usize,
     est_cursor: usize,
 }
 
@@ -82,9 +72,9 @@ pub struct State {
     pub task_id: u32,
     pub text: String,
     pub text_cursor: usize,
-    pub priority: Priority,
-    pub due_str: String,
-    pub due_cursor: usize,
+    pub category: Category,
+    pub ord_str: String,
+    pub ord_cursor: usize,
     pub est_str: String,
     pub est_cursor: usize,
     pub focus: Field,
@@ -92,38 +82,34 @@ pub struct State {
     pub status: Option<String>,
     pub mode: Mode,
     pub command_buf: String,
-    pub due_pristine: bool,
+    pub ord_pristine: bool,
     pub est_pristine: bool,
     pub dirty: bool,
     undo_stack: Vec<Snapshot>,
     redo_stack: Vec<Snapshot>,
-    /// Snapshot of the most recently persisted (or initial) state. Used both for the
-    /// dirty check and to decide whether to re-parse Due — when the displayed string
-    /// matches the baseline exactly, we use the baseline's stored DateTime so the user
-    /// doesn't get drift from "in 5m" being parsed at commit time.
     original: Snapshot,
 }
 
 impl State {
     pub fn from_task(task: &Task) -> Self {
-        let due_str = format_relative(task.due, chrono::Utc::now());
+        let ord_str = task.ord.to_string();
         let est_str = format_est(task.est_secs);
         let original = Snapshot {
             text: task.text.clone(),
-            priority: task.priority,
-            due_str: due_str.clone(),
+            category: task.category,
+            ord_str: ord_str.clone(),
             est_str: est_str.clone(),
             text_cursor: task.text.chars().count(),
-            due_cursor: due_str.chars().count(),
+            ord_cursor: ord_str.chars().count(),
             est_cursor: est_str.chars().count(),
         };
         Self {
             task_id: task.id,
             text: task.text.clone(),
             text_cursor: task.text.chars().count(),
-            priority: task.priority,
-            due_cursor: due_str.chars().count(),
-            due_str,
+            category: task.category,
+            ord_cursor: ord_str.chars().count(),
+            ord_str,
             est_cursor: est_str.chars().count(),
             est_str,
             focus: Field::Text,
@@ -131,7 +117,7 @@ impl State {
             status: None,
             mode: Mode::Edit,
             command_buf: String::new(),
-            due_pristine: false,
+            ord_pristine: false,
             est_pristine: false,
             dirty: false,
             undo_stack: Vec::new(),
@@ -143,22 +129,22 @@ impl State {
     fn snapshot(&self) -> Snapshot {
         Snapshot {
             text: self.text.clone(),
-            priority: self.priority,
-            due_str: self.due_str.clone(),
+            category: self.category,
+            ord_str: self.ord_str.clone(),
             est_str: self.est_str.clone(),
             text_cursor: self.text_cursor,
-            due_cursor: self.due_cursor,
+            ord_cursor: self.ord_cursor,
             est_cursor: self.est_cursor,
         }
     }
 
     fn restore(&mut self, s: Snapshot) {
         self.text = s.text;
-        self.priority = s.priority;
-        self.due_str = s.due_str;
+        self.category = s.category;
+        self.ord_str = s.ord_str;
         self.est_str = s.est_str;
         self.text_cursor = s.text_cursor;
-        self.due_cursor = s.due_cursor;
+        self.ord_cursor = s.ord_cursor;
         self.est_cursor = s.est_cursor;
     }
 
@@ -176,25 +162,15 @@ impl State {
         self.dirty = self.snapshot() != self.original;
     }
 
-    /// Build a Task by overlaying form values onto `baseline`. Returns Err with a
-    /// user-facing message on validation failure (empty text, unparseable due/est).
-    ///
-    /// If the Due field hasn't been edited (compared verbatim against the baseline's
-    /// displayed form), we re-use baseline.due directly — this keeps "in 5m" from
-    /// drifting forward when the user :w's without touching the Due field.
     pub fn commit(&self, baseline: &Task) -> std::result::Result<Task, String> {
         let trimmed = self.text.trim();
         if trimmed.is_empty() {
             return Err("text cannot be empty".into());
         }
-        let due = if self.due_str == self.original.due_str {
-            baseline.due
-        } else {
-            let now_local: chrono::DateTime<Local> = chrono::Utc::now().into();
-            match parse_due(self.due_str.trim(), now_local) {
-                Ok(d) => d.with_timezone(&chrono::Utc),
-                Err(e) => return Err(format!("invalid due: {e}")),
-            }
+        let ord: u32 = match self.ord_str.trim().parse() {
+            Ok(n) if n >= 1 => n,
+            Ok(_) => return Err("ord must be >= 1".into()),
+            Err(_) => return Err(format!("invalid ord '{}'", self.ord_str.trim())),
         };
         let est_secs = match parse_duration(self.est_str.trim()) {
             Ok(d) => d.num_seconds(),
@@ -203,8 +179,8 @@ impl State {
 
         let mut updated = baseline.clone();
         updated.text = trimmed.to_string();
-        updated.priority = self.priority;
-        updated.due = due;
+        updated.category = self.category;
+        updated.ord = ord;
         updated.est_secs = est_secs;
         Ok(updated)
     }
@@ -235,15 +211,9 @@ impl State {
         self.error = None;
     }
 
-    /// Refresh the baseline after a successful save. The current form contents become
-    /// the new "clean" point — :q now exits without complaining.
     fn rebaseline(&mut self, persisted: &Task) {
-        // Update due_str to mirror the persisted due so future :w without edits keeps
-        // working off baseline.due. Without this, the displayed "in 5m" could lag the
-        // persisted DateTime and a no-op :w would parse and shift things.
-        let new_due_str = format_relative(persisted.due, chrono::Utc::now());
-        self.due_str = new_due_str;
-        self.due_cursor = self.due_str.chars().count();
+        self.ord_str = persisted.ord.to_string();
+        self.ord_cursor = self.ord_str.chars().count();
         self.original = self.snapshot();
         self.dirty = false;
         self.task_id = persisted.id;
@@ -274,8 +244,6 @@ pub fn handle_key(state: &mut State, key: KeyEvent) -> Action {
         return handle_command_mode(state, key);
     }
 
-    // Esc and Ctrl+C are intentional no-ops in edit mode: the user is required to use
-    // :q / :q! / :wq to leave, so they can't bail out by mashing the wrong key.
     if matches!(key.code, KeyCode::Esc)
         || matches!(
             (key.code, key.modifiers),
@@ -286,11 +254,15 @@ pub fn handle_key(state: &mut State, key: KeyEvent) -> Action {
     }
 
     match (key.code, key.modifiers) {
-        (KeyCode::Char('z'), m) if m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::SHIFT) => {
+        (KeyCode::Char('z'), m)
+            if m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::SHIFT) =>
+        {
             state.undo();
             return Action::Continue;
         }
-        (KeyCode::Char('Z'), m) if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) => {
+        (KeyCode::Char('Z'), m)
+            if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
+        {
             state.redo();
             return Action::Continue;
         }
@@ -322,9 +294,9 @@ pub fn handle_key(state: &mut State, key: KeyEvent) -> Action {
 
     match state.focus {
         Field::Text => handle_text_field(state, key),
-        Field::Due => handle_text_due(state, key),
+        Field::Ord => handle_text_ord(state, key),
         Field::Est => handle_text_est(state, key),
-        Field::Priority => handle_priority(state, key),
+        Field::Category => handle_category(state, key),
     }
     Action::Continue
 }
@@ -377,8 +349,12 @@ fn execute_command(state: &mut State) -> Action {
 }
 
 fn move_focus(state: &mut State, forward: bool) {
-    state.focus = if forward { state.focus.next() } else { state.focus.prev() };
-    state.due_pristine = matches!(state.focus, Field::Due);
+    state.focus = if forward {
+        state.focus.next()
+    } else {
+        state.focus.prev()
+    };
+    state.ord_pristine = matches!(state.focus, Field::Ord);
     state.est_pristine = matches!(state.focus, Field::Est);
 }
 
@@ -406,9 +382,7 @@ fn handle_text_field(state: &mut State, key: KeyEvent) {
             state.recompute_dirty();
         }
         KeyCode::Left => {
-            if state.text_cursor > 0 {
-                state.text_cursor -= 1;
-            }
+            state.text_cursor = state.text_cursor.saturating_sub(1);
         }
         KeyCode::Right => {
             let len = state.text.chars().count();
@@ -422,42 +396,40 @@ fn handle_text_field(state: &mut State, key: KeyEvent) {
     }
 }
 
-fn handle_text_due(state: &mut State, key: KeyEvent) {
-    if matches!(key.code, KeyCode::Char(_)) && state.due_pristine {
+fn handle_text_ord(state: &mut State, key: KeyEvent) {
+    if matches!(key.code, KeyCode::Char(_)) && state.ord_pristine {
         state.checkpoint();
-        state.due_str.clear();
-        state.due_cursor = 0;
-        state.due_pristine = false;
+        state.ord_str.clear();
+        state.ord_cursor = 0;
+        state.ord_pristine = false;
     }
     match key.code {
-        KeyCode::Char(c) => {
+        KeyCode::Char(c) if c.is_ascii_digit() => {
             state.checkpoint();
-            insert_char(&mut state.due_str, &mut state.due_cursor, c);
+            insert_char(&mut state.ord_str, &mut state.ord_cursor, c);
             state.recompute_dirty();
         }
         KeyCode::Backspace => {
             state.checkpoint();
-            delete_before(&mut state.due_str, &mut state.due_cursor);
+            delete_before(&mut state.ord_str, &mut state.ord_cursor);
             state.recompute_dirty();
         }
         KeyCode::Delete => {
             state.checkpoint();
-            delete_at(&mut state.due_str, &mut state.due_cursor);
+            delete_at(&mut state.ord_str, &mut state.ord_cursor);
             state.recompute_dirty();
         }
         KeyCode::Left => {
-            if state.due_cursor > 0 {
-                state.due_cursor -= 1;
-            }
+            state.ord_cursor = state.ord_cursor.saturating_sub(1);
         }
         KeyCode::Right => {
-            let len = state.due_str.chars().count();
-            if state.due_cursor < len {
-                state.due_cursor += 1;
+            let len = state.ord_str.chars().count();
+            if state.ord_cursor < len {
+                state.ord_cursor += 1;
             }
         }
-        KeyCode::Home => state.due_cursor = 0,
-        KeyCode::End => state.due_cursor = state.due_str.chars().count(),
+        KeyCode::Home => state.ord_cursor = 0,
+        KeyCode::End => state.ord_cursor = state.ord_str.chars().count(),
         _ => {}
     }
 }
@@ -486,9 +458,7 @@ fn handle_text_est(state: &mut State, key: KeyEvent) {
             state.recompute_dirty();
         }
         KeyCode::Left => {
-            if state.est_cursor > 0 {
-                state.est_cursor -= 1;
-            }
+            state.est_cursor = state.est_cursor.saturating_sub(1);
         }
         KeyCode::Right => {
             let len = state.est_str.chars().count();
@@ -533,27 +503,27 @@ fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
-fn handle_priority(state: &mut State, key: KeyEvent) {
-    let new_priority = match key.code {
-        KeyCode::Char('a') | KeyCode::Char('A') => Some(Priority::A),
-        KeyCode::Char('b') | KeyCode::Char('B') => Some(Priority::B),
-        KeyCode::Char('c') | KeyCode::Char('C') => Some(Priority::C),
-        KeyCode::Left => Some(match state.priority {
-            Priority::A => Priority::C,
-            Priority::B => Priority::A,
-            Priority::C => Priority::B,
+fn handle_category(state: &mut State, key: KeyEvent) {
+    let new_category = match key.code {
+        KeyCode::Char('a') | KeyCode::Char('A') => Some(Category::A),
+        KeyCode::Char('b') | KeyCode::Char('B') => Some(Category::B),
+        KeyCode::Char('c') | KeyCode::Char('C') => Some(Category::C),
+        KeyCode::Left => Some(match state.category {
+            Category::A => Category::C,
+            Category::B => Category::A,
+            Category::C => Category::B,
         }),
-        KeyCode::Right | KeyCode::Char(' ') => Some(match state.priority {
-            Priority::A => Priority::B,
-            Priority::B => Priority::C,
-            Priority::C => Priority::A,
+        KeyCode::Right | KeyCode::Char(' ') => Some(match state.category {
+            Category::A => Category::B,
+            Category::B => Category::C,
+            Category::C => Category::A,
         }),
         _ => None,
     };
-    if let Some(p) = new_priority {
-        if p != state.priority {
+    if let Some(p) = new_category {
+        if p != state.category {
             state.checkpoint();
-            state.priority = p;
+            state.category = p;
             state.recompute_dirty();
         }
     }
@@ -587,15 +557,43 @@ fn draw(frame: &mut Frame, state: &State) {
         ])
         .split(inner);
 
-    draw_field(frame, chunks[1], "Text:    ", &state.text, state.focus == Field::Text && state.mode == Mode::Edit, state.text_cursor);
-    draw_priority(frame, chunks[2], state.priority, state.focus == Field::Priority && state.mode == Mode::Edit);
-    draw_field(frame, chunks[3], "Due:     ", &state.due_str, state.focus == Field::Due && state.mode == Mode::Edit, state.due_cursor);
-    draw_field(frame, chunks[4], "Est:     ", &state.est_str, state.focus == Field::Est && state.mode == Mode::Edit, state.est_cursor);
+    draw_field(
+        frame,
+        chunks[1],
+        "Text:    ",
+        &state.text,
+        state.focus == Field::Text && state.mode == Mode::Edit,
+        state.text_cursor,
+    );
+    draw_category(
+        frame,
+        chunks[2],
+        state.category,
+        state.focus == Field::Category && state.mode == Mode::Edit,
+    );
+    draw_field(
+        frame,
+        chunks[3],
+        "Ord:     ",
+        &state.ord_str,
+        state.focus == Field::Ord && state.mode == Mode::Edit,
+        state.ord_cursor,
+    );
+    draw_field(
+        frame,
+        chunks[4],
+        "Est:     ",
+        &state.est_str,
+        state.focus == Field::Est && state.mode == Mode::Edit,
+        state.est_cursor,
+    );
 
     let status_line: Line = if state.mode == Mode::Command {
         Line::from(Span::styled(
             format!(" :{}", state.command_buf),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         ))
     } else if let Some(err) = &state.error {
         Line::from(Span::styled(
@@ -618,7 +616,10 @@ fn draw(frame: &mut Frame, state: &State) {
         " Tab/↑↓ next · Enter next · : command · Ctrl+Z undo · Ctrl+Shift+Z redo "
     };
     frame.render_widget(
-        Paragraph::new(Span::styled(help_text, Style::default().fg(Color::DarkGray))),
+        Paragraph::new(Span::styled(
+            help_text,
+            Style::default().fg(Color::DarkGray),
+        )),
         chunks[8],
     );
 
@@ -628,7 +629,14 @@ fn draw(frame: &mut Frame, state: &State) {
     }
 }
 
-fn draw_field(frame: &mut Frame, area: Rect, label: &str, value: &str, focused: bool, cursor: usize) {
+fn draw_field(
+    frame: &mut Frame,
+    area: Rect,
+    label: &str,
+    value: &str,
+    focused: bool,
+    cursor: usize,
+) {
     let label_span = Span::styled(label.to_string(), Style::default().fg(Color::Cyan));
     let value_style = if focused {
         Style::default()
@@ -639,10 +647,7 @@ fn draw_field(frame: &mut Frame, area: Rect, label: &str, value: &str, focused: 
         Style::default().fg(Color::White)
     };
 
-    let display_width = area
-        .width
-        .saturating_sub(label.chars().count() as u16 + 2)
-        as usize;
+    let display_width = area.width.saturating_sub(label.chars().count() as u16 + 2) as usize;
     let mut padded = value.to_string();
     while padded.chars().count() < display_width {
         padded.push(' ');
@@ -659,18 +664,20 @@ fn draw_field(frame: &mut Frame, area: Rect, label: &str, value: &str, focused: 
     }
 }
 
-fn draw_priority(frame: &mut Frame, area: Rect, priority: Priority, focused: bool) {
-    let label = Span::styled("Priority:", Style::default().fg(Color::Cyan));
+fn draw_category(frame: &mut Frame, area: Rect, category: Category, focused: bool) {
+    let label = Span::styled("Category:", Style::default().fg(Color::Cyan));
     let mut spans = vec![Span::raw(" "), label, Span::raw(" ")];
-    for p in [Priority::A, Priority::B, Priority::C] {
-        let selected = p == priority;
+    for p in [Category::A, Category::B, Category::C] {
+        let selected = p == category;
         let style = if selected && focused {
             Style::default()
                 .fg(Color::Black)
-                .bg(priority_color(p))
+                .bg(category_color(p))
                 .add_modifier(Modifier::BOLD)
         } else if selected {
-            Style::default().fg(priority_color(p)).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(category_color(p))
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::DarkGray)
         };
@@ -686,15 +693,21 @@ fn draw_priority(frame: &mut Frame, area: Rect, priority: Priority, focused: boo
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn priority_color(p: Priority) -> Color {
+fn category_color(p: Category) -> Color {
     match p {
-        Priority::A => Color::Red,
-        Priority::B => Color::Yellow,
-        Priority::C => Color::DarkGray,
+        Category::A => Color::Red,
+        Category::B => Color::Yellow,
+        Category::C => Color::DarkGray,
     }
 }
 
 pub fn run(task: &Task, save: &mut Saver<'_>) -> Result<()> {
+    use std::io::IsTerminal;
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return Err(Error::Parse(
+            "the form editor requires a TTY; pass field args instead, e.g. `task edit <id> c:a` or `task edit <id> ord:1`".into(),
+        ));
+    }
     enable_raw_mode().map_err(Error::Io)?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen).map_err(Error::Io)?;
@@ -719,9 +732,7 @@ fn run_loop(
     let mut baseline = initial.clone();
     let mut state = State::from_task(&baseline);
     loop {
-        terminal
-            .draw(|f| draw(f, &state))
-            .map_err(Error::Io)?;
+        terminal.draw(|f| draw(f, &state)).map_err(Error::Io)?;
 
         let event = event::read().map_err(Error::Io)?;
         let key = match event {
@@ -757,18 +768,20 @@ fn run_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Priority, Status};
+    use crate::model::{Category, Status};
     use chrono::Utc;
 
     fn make_task() -> Task {
+        let now = Utc::now();
         Task {
             id: 1,
             text: "Buy milk".to_string(),
-            priority: Priority::B,
-            due: Utc::now(),
+            category: Category::B,
+            ord: 1,
             est_secs: 1800,
             status: Status::Active,
-            created_at: Utc::now(),
+            created_at: now,
+            updated_at: now,
             completed_at: None,
             deleted_at: None,
         }
@@ -783,11 +796,11 @@ mod tests {
     }
 
     #[test]
-    fn from_task_seeds_due_in_relative_format() {
+    fn from_task_seeds_ord_as_string() {
         let mut t = make_task();
-        t.due = Utc::now() + chrono::Duration::hours(2);
+        t.ord = 7;
         let state = State::from_task(&t);
-        assert!(state.due_str.starts_with("in "));
+        assert_eq!(state.ord_str, "7");
     }
 
     #[test]
@@ -811,21 +824,13 @@ mod tests {
         let task = make_task();
         let mut state = State::from_task(&task);
         handle_key(&mut state, key(KeyCode::Tab));
-        assert_eq!(state.focus, Field::Priority);
+        assert_eq!(state.focus, Field::Category);
         handle_key(&mut state, key(KeyCode::Tab));
-        assert_eq!(state.focus, Field::Due);
+        assert_eq!(state.focus, Field::Ord);
         handle_key(&mut state, key(KeyCode::Tab));
         assert_eq!(state.focus, Field::Est);
         handle_key(&mut state, key(KeyCode::Tab));
         assert_eq!(state.focus, Field::Text);
-    }
-
-    #[test]
-    fn enter_advances_to_next_field() {
-        let task = make_task();
-        let mut state = State::from_task(&task);
-        handle_key(&mut state, key(KeyCode::Enter));
-        assert_eq!(state.focus, Field::Priority);
     }
 
     #[test]
@@ -834,31 +839,32 @@ mod tests {
         let mut state = State::from_task(&task);
         handle_key(&mut state, key(KeyCode::Char('!')));
         assert_eq!(state.text, "Buy milk!");
-        assert_eq!(state.text_cursor, 9);
         assert!(state.dirty);
     }
 
     #[test]
-    fn first_char_in_due_clears_existing_value() {
-        let task = make_task();
-        let mut state = State::from_task(&task);
+    fn ord_field_accepts_only_digits() {
+        let mut t = make_task();
+        t.ord = 1;
+        let mut state = State::from_task(&t);
         handle_key(&mut state, key(KeyCode::Tab));
         handle_key(&mut state, key(KeyCode::Tab));
-        assert_eq!(state.focus, Field::Due);
-
-        handle_key(&mut state, key(KeyCode::Char('t')));
-        assert_eq!(state.due_str, "t");
-
-        handle_key(&mut state, key(KeyCode::Char('o')));
-        handle_key(&mut state, key(KeyCode::Char('m')));
-        assert_eq!(state.due_str, "tom");
+        assert_eq!(state.focus, Field::Ord);
+        handle_key(&mut state, key(KeyCode::Char('5')));
+        assert_eq!(state.ord_str, "5");
+        // Non-digit is rejected.
+        handle_key(&mut state, key(KeyCode::Char('x')));
+        assert_eq!(state.ord_str, "5");
     }
 
     #[test]
     fn colon_wq_signals_save_and_quit() {
         let task = make_task();
         let mut state = State::from_task(&task);
-        handle_key(&mut state, KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE),
+        );
         handle_key(&mut state, key(KeyCode::Char('w')));
         handle_key(&mut state, key(KeyCode::Char('q')));
         let action = handle_key(&mut state, key(KeyCode::Enter));
@@ -866,21 +872,14 @@ mod tests {
     }
 
     #[test]
-    fn colon_w_signals_save() {
-        let task = make_task();
-        let mut state = State::from_task(&task);
-        handle_key(&mut state, KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
-        handle_key(&mut state, key(KeyCode::Char('w')));
-        let action = handle_key(&mut state, key(KeyCode::Enter));
-        assert!(matches!(action, Action::Save));
-    }
-
-    #[test]
     fn colon_q_errors_when_dirty() {
         let task = make_task();
         let mut state = State::from_task(&task);
         handle_key(&mut state, key(KeyCode::Char('!')));
-        handle_key(&mut state, KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE),
+        );
         handle_key(&mut state, key(KeyCode::Char('q')));
         let action = handle_key(&mut state, key(KeyCode::Enter));
         assert!(matches!(action, Action::Continue));
@@ -891,7 +890,10 @@ mod tests {
     fn colon_q_when_clean_cancels() {
         let task = make_task();
         let mut state = State::from_task(&task);
-        handle_key(&mut state, KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE));
+        handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char(':'), KeyModifiers::NONE),
+        );
         handle_key(&mut state, key(KeyCode::Char('q')));
         let action = handle_key(&mut state, key(KeyCode::Enter));
         assert!(matches!(action, Action::Cancel));
@@ -908,28 +910,15 @@ mod tests {
     }
 
     #[test]
-    fn rebaseline_clears_dirty_and_updates_id() {
+    fn commit_returns_ord_as_typed() {
         let mut task = make_task();
-        task.id = 0;
+        task.ord = 3;
         let mut state = State::from_task(&task);
-        handle_key(&mut state, key(KeyCode::Char('!')));
-        assert!(state.dirty);
-
-        let mut persisted = task.clone();
-        persisted.id = 17;
-        persisted.text = "Buy milk!".into();
-        state.rebaseline(&persisted);
-        assert!(!state.dirty);
-        assert_eq!(state.task_id, 17);
-    }
-
-    #[test]
-    fn commit_uses_baseline_due_when_due_str_unchanged() {
-        let mut task = make_task();
-        task.due = Utc::now() + chrono::Duration::hours(2);
-        let state = State::from_task(&task);
+        // Tab to Ord, replace value.
+        handle_key(&mut state, key(KeyCode::Tab));
+        handle_key(&mut state, key(KeyCode::Tab));
+        handle_key(&mut state, key(KeyCode::Char('9')));
         let updated = state.commit(&task).unwrap();
-        // Without re-parsing "in 2h", due is preserved exactly.
-        assert_eq!(updated.due, task.due);
+        assert_eq!(updated.ord, 9);
     }
 }

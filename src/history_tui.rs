@@ -112,7 +112,7 @@ impl App {
 
 fn load_entries(store: &Store) -> Result<Vec<(u64, HistoryEntry)>> {
     let mut entries = store.history()?;
-    entries.sort_by(|a, b| b.0.cmp(&a.0));
+    entries.sort_by_key(|(id, _)| std::cmp::Reverse(*id));
     Ok(entries)
 }
 
@@ -142,10 +142,7 @@ pub fn run(store: &mut Store) -> Result<()> {
     Ok(())
 }
 
-fn run_loop(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    app: &mut App,
-) -> Result<()> {
+fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
     loop {
         terminal.draw(|f| draw(f, app)).map_err(Error::Io)?;
 
@@ -163,9 +160,7 @@ fn run_loop(
                 app.cursor = app.cursor.saturating_sub(1);
             }
             (KeyCode::Down, _) => {
-                if app.cursor + 1 < app.entries.len() {
-                    app.cursor += 1;
-                }
+                app.cursor = (app.cursor + 1).min(app.entries.len().saturating_sub(1));
             }
             (KeyCode::Char('u'), KeyModifiers::NONE) | (KeyCode::Enter, _) => {
                 app.toggle_mark_at_cursor();
@@ -281,16 +276,17 @@ mod tests {
     /// Build N events that all touch the same task — that's what the cascade is
     /// scoped to, so this is the relevant shape for the navigation tests.
     fn same_task_entries(event_ids: &[u64], task_id: u32) -> Vec<(u64, HistoryEntry)> {
-        use crate::model::{Priority, Status, Task};
+        use crate::model::{Category, Status, Task};
         let now = Utc::now();
         let baseline = Task {
             id: task_id,
             text: format!("task {task_id}"),
-            priority: Priority::B,
-            due: now,
+            category: Category::B,
+            ord: task_id,
             est_secs: 0,
             status: Status::Active,
             created_at: now,
+            updated_at: now,
             completed_at: None,
             deleted_at: None,
         };
@@ -301,19 +297,16 @@ mod tests {
             .map(|(i, id)| {
                 let op = if i == event_ids.len() - 1 {
                     // The oldest entry is the original add.
-                    RevertOp::Added { id: task_id }
+                    RevertOp::Added {
+                        task: baseline.clone(),
+                    }
                 } else {
                     RevertOp::Edited {
                         before: baseline.clone(),
+                        after: baseline.clone(),
                     }
                 };
-                (
-                    *id,
-                    HistoryEntry {
-                        op,
-                        timestamp: now,
-                    },
-                )
+                (*id, HistoryEntry { op, timestamp: now })
             })
             .collect()
     }
@@ -380,17 +373,19 @@ mod tests {
     /// cascades all show up together.
     #[test]
     fn anchors_on_two_tasks_union_their_cascades() {
-        use crate::model::{Priority, Status, Task};
+        use crate::model::{Category, Status, Task};
         let now = Utc::now();
         fn t(id: u32) -> Task {
+            let now = Utc::now();
             Task {
                 id,
                 text: format!("task {id}"),
-                priority: Priority::B,
-                due: Utc::now(),
+                category: Category::B,
+                ord: id,
                 est_secs: 0,
                 status: Status::Active,
-                created_at: Utc::now(),
+                created_at: now,
+                updated_at: now,
                 completed_at: None,
                 deleted_at: None,
             }
@@ -402,11 +397,50 @@ mod tests {
         //   2 → edited #1
         //   1 → added #1
         let entries = vec![
-            (5, HistoryEntry { op: RevertOp::Edited { before: t(2) }, timestamp: now }),
-            (4, HistoryEntry { op: RevertOp::Edited { before: t(1) }, timestamp: now }),
-            (3, HistoryEntry { op: RevertOp::Added { id: 2 }, timestamp: now }),
-            (2, HistoryEntry { op: RevertOp::Edited { before: t(1) }, timestamp: now }),
-            (1, HistoryEntry { op: RevertOp::Added { id: 1 }, timestamp: now }),
+            (
+                5,
+                HistoryEntry {
+                    op: RevertOp::Edited {
+                        before: t(2),
+                        after: t(2),
+                    },
+                    timestamp: now,
+                },
+            ),
+            (
+                4,
+                HistoryEntry {
+                    op: RevertOp::Edited {
+                        before: t(1),
+                        after: t(1),
+                    },
+                    timestamp: now,
+                },
+            ),
+            (
+                3,
+                HistoryEntry {
+                    op: RevertOp::Added { task: t(2) },
+                    timestamp: now,
+                },
+            ),
+            (
+                2,
+                HistoryEntry {
+                    op: RevertOp::Edited {
+                        before: t(1),
+                        after: t(1),
+                    },
+                    timestamp: now,
+                },
+            ),
+            (
+                1,
+                HistoryEntry {
+                    op: RevertOp::Added { task: t(1) },
+                    timestamp: now,
+                },
+            ),
         ];
         let mut app = App::from_entries(entries);
 
@@ -432,17 +466,19 @@ mod tests {
     /// Mixed-task entries: anchoring on a #task-A event must NOT mark newer #task-B events.
     #[test]
     fn cascade_skips_events_for_other_tasks() {
-        use crate::model::{Priority, Status, Task};
+        use crate::model::{Category, Status, Task};
         let now = Utc::now();
         fn t(id: u32) -> Task {
+            let now = Utc::now();
             Task {
                 id,
                 text: format!("task {id}"),
-                priority: Priority::B,
-                due: Utc::now(),
+                category: Category::B,
+                ord: id,
                 est_secs: 0,
                 status: Status::Active,
-                created_at: Utc::now(),
+                created_at: now,
+                updated_at: now,
                 completed_at: None,
                 deleted_at: None,
             }
@@ -450,10 +486,40 @@ mod tests {
         // History (newest-first): event 4 edits task #1, event 3 adds task #2,
         // event 2 edits task #1, event 1 adds task #1.
         let entries = vec![
-            (4, HistoryEntry { op: RevertOp::Edited { before: t(1) }, timestamp: now }),
-            (3, HistoryEntry { op: RevertOp::Added { id: 2 }, timestamp: now }),
-            (2, HistoryEntry { op: RevertOp::Edited { before: t(1) }, timestamp: now }),
-            (1, HistoryEntry { op: RevertOp::Added { id: 1 }, timestamp: now }),
+            (
+                4,
+                HistoryEntry {
+                    op: RevertOp::Edited {
+                        before: t(1),
+                        after: t(1),
+                    },
+                    timestamp: now,
+                },
+            ),
+            (
+                3,
+                HistoryEntry {
+                    op: RevertOp::Added { task: t(2) },
+                    timestamp: now,
+                },
+            ),
+            (
+                2,
+                HistoryEntry {
+                    op: RevertOp::Edited {
+                        before: t(1),
+                        after: t(1),
+                    },
+                    timestamp: now,
+                },
+            ),
+            (
+                1,
+                HistoryEntry {
+                    op: RevertOp::Added { task: t(1) },
+                    timestamp: now,
+                },
+            ),
         ];
         let mut app = App::from_entries(entries);
         // Anchor on event 1 (add task #1).
@@ -464,6 +530,9 @@ mod tests {
         assert!(app.is_marked(4));
         assert!(app.is_marked(2));
         assert!(app.is_marked(1));
-        assert!(!app.is_marked(3), "task #2 event should not be in the cascade");
+        assert!(
+            !app.is_marked(3),
+            "task #2 event should not be in the cascade"
+        );
     }
 }

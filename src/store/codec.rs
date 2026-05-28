@@ -28,7 +28,6 @@ where
     type DItem = T;
 
     fn bytes_decode(bytes: &'a [u8]) -> Result<Self::DItem, BoxedError> {
-        bincode::deserialize(bytes)
-            .map_err(|e| Box::new(Error::Encode(e)) as BoxedError)
+        bincode::deserialize(bytes).map_err(|e| Box::new(Error::Encode(e)) as BoxedError)
     }
 }

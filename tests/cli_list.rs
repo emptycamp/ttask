@@ -1,6 +1,7 @@
 mod support;
 
 use assert_cmd::Command;
+use predicates::prelude::*;
 use predicates::str::contains;
 use support::StoreScope;
 
@@ -23,10 +24,7 @@ fn list_empty_store_shows_no_tasks() {
 #[test]
 fn list_alias_ls_works() {
     let scope = StoreScope::new();
-    task(&scope)
-        .args(["ls"])
-        .assert()
-        .success();
+    task(&scope).args(["ls"]).assert().success();
 }
 
 #[test]
@@ -135,7 +133,10 @@ fn list_all_shows_active_completed_and_deleted() {
     let scope = StoreScope::new();
     task(&scope).args(["add", "Active task"]).assert().success();
     task(&scope).args(["add", "Done task"]).assert().success();
-    task(&scope).args(["add", "Trashed task"]).assert().success();
+    task(&scope)
+        .args(["add", "Trashed task"])
+        .assert()
+        .success();
     task(&scope).args(["complete", "2"]).assert().success();
     task(&scope).args(["delete", "3"]).assert().success();
     task(&scope)
@@ -162,7 +163,7 @@ fn list_help_includes_examples_for_all_filters() {
 }
 
 #[test]
-fn list_output_includes_header() {
+fn list_output_includes_ord_column_header_not_due() {
     let scope = StoreScope::new();
     task(&scope).args(["add", "Active task"]).assert().success();
     task(&scope)
@@ -171,8 +172,77 @@ fn list_output_includes_header() {
         .success()
         .stdout(contains("ID"))
         .stdout(contains("Description"))
-        .stdout(contains("Due"))
-        .stdout(contains("Est"));
+        .stdout(contains("Ord"))
+        .stdout(contains("Est"))
+        .stdout(predicates::str::contains("Due").not());
 }
 
-use predicates::prelude::*;
+#[test]
+fn list_does_not_show_day_headings() {
+    let scope = StoreScope::new();
+    task(&scope).args(["add", "today task"]).assert().success();
+    let out = task(&scope).args(["list"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("Today") && !stdout.contains("Tomorrow") && !stdout.contains("Yesterday"),
+        "list view must be flat (no day groupings):\n{stdout}"
+    );
+}
+
+#[test]
+fn list_does_not_show_hidden_indicator() {
+    let scope = StoreScope::new();
+    // Many tasks; ensure no "+N" indicator appears.
+    for i in 0..10 {
+        task(&scope)
+            .args(["add", &format!("task{i}")])
+            .assert()
+            .success();
+    }
+    let out = task(&scope).args(["list"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains('+'),
+        "list must not show a +N hidden indicator:\n{stdout}"
+    );
+}
+
+#[test]
+fn list_orders_by_ord() {
+    let scope = StoreScope::new();
+    task(&scope).args(["add", "first"]).assert().success();
+    task(&scope).args(["add", "second"]).assert().success();
+    // Move second to ord:1.
+    task(&scope).args(["edit", "2", "ord:1"]).assert().success();
+    let out = task(&scope).args(["list"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let pos_second = stdout.find("second").unwrap();
+    let pos_first = stdout.find("first").unwrap();
+    assert!(
+        pos_second < pos_first,
+        "task with ord:1 should be listed first:\n{stdout}"
+    );
+}
+
+#[test]
+fn list_format_md_outputs_markdown_table_with_ord_not_due() {
+    let scope = StoreScope::new();
+    task(&scope).args(["add", "Buy milk"]).assert().success();
+    task(&scope)
+        .args(["--format", "md", "list"])
+        .assert()
+        .success()
+        .stdout(contains("# Tasks"))
+        .stdout(contains("| ID | Cat | Status | Ord | Description | Est |"))
+        .stdout(contains("Buy milk"));
+}
+
+#[test]
+fn list_format_md_empty_uses_no_tasks_italic() {
+    let scope = StoreScope::new();
+    task(&scope)
+        .args(["--format", "md", "list"])
+        .assert()
+        .success()
+        .stdout(contains("_No tasks._"));
+}
