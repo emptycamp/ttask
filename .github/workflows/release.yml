@@ -2,24 +2,33 @@ name: Release
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
+    name: Create release
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      issues: write
-      pull-requests: write
     outputs:
       published: ${{ steps.semantic.outputs.new_release_published }}
       tag: ${{ steps.semantic.outputs.new_release_git_tag }}
+      version: ${{ steps.semantic.outputs.new_release_version }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
-      - uses: cycjimmy/semantic-release-action@v6
+
+      - name: Semantic release
         id: semantic
+        uses: cycjimmy/semantic-release-action@v6
         with:
           extra_plugins: |
             conventional-changelog-conventionalcommits
@@ -27,16 +36,24 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build-windows-asset:
+    name: Build and upload tt.exe
+    runs-on: windows-latest
     needs: release
     if: needs.release.outputs.published == 'true'
-    runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout release tag
+        uses: actions/checkout@v6
         with:
           ref: ${{ needs.release.outputs.tag }}
-      - uses: dtolnay/rust-toolchain@stable
-      - run: cargo build --release --locked
-      - uses: softprops/action-gh-release@v2
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Upload tt.exe to release
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.release.outputs.tag }}
           files: target/release/task.exe
