@@ -119,8 +119,8 @@ If no command is given, the interactive TUI opens.
 ## Commands
 
 - **add** `ARGS...` — Add a new task.
-- **list** — List tasks (active by default), sorted by manual Ord.
-- **edit** `ID [ARGS]...` — Edit a task. With no args, opens the form editor.
+- **list** — List tasks (active by default), grouped by category then manual order.
+- **edit** `ID [ARGS]...` — Edit a task. With no args, opens the text editor.
 - **delete** `ID` — Soft-delete a task (recoverable via `history`).
 - **complete** `ID` — Mark a task as completed.
 - **info** `ID` — Show task details.
@@ -132,14 +132,15 @@ If no command is given, the interactive TUI opens.
 Run `task` with no command to open the interactive list. Then:
 
 - `↑` / `↓` — move cursor between tasks
-- `1`..`9` — move the cursor task to that 1-based position (digits 1–9)
-- `Enter` — edit the task at the cursor
+- `1`..`9` — move the cursor task to that 1-based position within its category
+- `Enter` / `e` — edit the task at the cursor (text + estimate)
 - `/` — search/filter the task list; type to filter, `Enter` to apply, `Esc` to
   cancel the edit
 - `a` — add a task
-- `e` — edit the task at the cursor
-- `c` / `d` — toggle pending complete / delete (applied on quit)
-- `Shift+A` / `Shift+B` / `Shift+C` — set category on the cursor task
+- `c` / `d` — complete / delete the cursor task (applied immediately)
+- `Shift+A` / `Shift+B` / `Shift+C` — set category on the cursor task (immediate)
+- `u` / `r` — undo / redo the last change made this session. Undo/redo history is
+  cleared when you quit; after that, roll back via `task history`.
 - `Esc` — clear an active search filter on the first press; quit on the next.
   `Ctrl+C` quits unconditionally.
 
@@ -154,8 +155,12 @@ Run `task` with no command to open the interactive list. Then:
 When using `add` or `edit`, fields can be set inline:
 
 - `c:a` | `c:b` | `c:c` — category (A is highest)
-- `ord:N` — manual order position (1-based)
+- `ord:N` — manual order position (1-based, within the category)
 - `est:30m` | `est:1h` | `est:2d` — estimated effort
+- A bare duration token at the start or end of the text (e.g. `Buy milk 30m`)
+  also sets the estimate. An explicit `est:` wins if both are present.
+
+Order is tracked per-category: A, B, and C each have their own 1-based sequence.
 
 ## Auto-deletion
 
@@ -211,7 +216,8 @@ Editing the task (text, category, ord, est) resets the clock.
 const LIST: &str = "\
 # task list
 
-List tasks. By default shows only active tasks, sorted by the manual Ord field.
+List tasks. By default shows only active tasks, grouped by category (A, then B,
+then C) and ordered within each category by its manual order.
 
 ## Usage
 
@@ -226,11 +232,15 @@ List tasks. By default shows only active tasks, sorted by the manual Ord field.
 
 ## Examples
 
-- `task list` — active tasks ordered by Ord
+- `task list` — active tasks, grouped by category
 - `task list --completed` — completed tasks
 - `task list --all` — everything
 
-In markdown mode tasks come back as a single table with `ID`, `Pri`, `Status`,
+The human view is ultra-compact (`1 A Buy milk · 30m`, no Ord column). The
+combined A+B estimate and projected finish time are shown only in the interactive
+`task` view, not in `task list`.
+
+In markdown mode tasks come back as a single table with `ID`, `Cat`, `Status`,
 `Ord`, `Description`, and `Est` columns.
 ";
 
@@ -243,21 +253,25 @@ Edit an existing task.
 
 `task edit ID [ARGS]...`
 
-With no field args, opens the built-in form editor inside the terminal — an
-interactive TUI that blocks on input.
+With no field args, opens the built-in text editor inside the terminal — an
+interactive TUI that blocks on input. It edits the task text only; a duration
+token at the start or end (e.g. `Buy milk 45m`) sets the estimate. Category and
+ord are not editable from the editor.
 
 ## ⚠ Notice for LLM agents
 
 **Always pass at least one field arg.** Calling `task edit 3` with no fields
-opens the interactive form editor and will hang your tool call. Use the inline
-field syntax instead — `task edit 3 c:a`, `task edit 3 ord:1 est:30m`, or
+opens the interactive editor and will hang your tool call. Use the inline field
+syntax instead — `task edit 3 c:a`, `task edit 3 ord:1 est:30m`, or
 `task edit 3 New text here` (anything not prefixed with `c:` / `ord:` /
-`est:` is treated as the new task text).
+`est:` is treated as the new task text, and a trailing/leading duration sets the
+estimate).
 
 ## Examples
 
 - `task edit 3 c:a` — set category via args
 - `task edit 3 New text` — change text via args
+- `task edit 3 New text 45m` — change text and set estimate (bare token)
 - `task edit 3 ord:1 est:30m` — move to first position and update estimate
 
 In markdown mode the edited task is re-rendered as a full info card after the change.

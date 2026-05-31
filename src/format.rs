@@ -1,6 +1,6 @@
 use crate::model::{Category, Status, Task};
 use crate::store::revert::HistoryEntry;
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Duration, Local, Utc};
 use crossterm::style::{Color, Stylize};
 use std::io::IsTerminal;
 
@@ -50,55 +50,23 @@ pub fn format_list(tasks: &[Task], opts: &RenderOptions) -> String {
         return "  No tasks.\n".to_string();
     }
 
-    let mut tasks: Vec<&Task> = tasks.iter().collect();
-    tasks.sort_by_key(|t| sort_key(t));
+    let mut sorted: Vec<&Task> = tasks.iter().collect();
+    sorted.sort_by_key(|t| sort_key(t));
 
     let mut out = String::new();
-    out.push_str(&header_row(opts));
-    out.push('\n');
-    out.push_str(&styled_divider(opts));
-    out.push('\n');
-
-    for t in tasks {
+    for t in sorted {
         out.push_str(&format_list_row(t, opts));
         out.push('\n');
     }
+    // The A+B estimate / finish-time summary is intentionally TUI-only — `task ls`
+    // stays a clean, scannable list with no footer.
     out
 }
 
-fn header_row(opts: &RenderOptions) -> String {
-    let row = format!(
-        "    {:>w_id$}  {:>w_cat$}  {:<w_text$}  {:>w_ord$}  {:>w_est$}",
-        "ID",
-        "Cat",
-        "Description",
-        "Ord",
-        "Est",
-        w_id = ID_W,
-        w_cat = CAT_W,
-        w_text = TEXT_W,
-        w_ord = ORD_W,
-        w_est = EST_W,
-    );
-    if opts.color {
-        format!("{}", row.with(Color::DarkGrey))
-    } else {
-        row
-    }
-}
-
-fn styled_divider(opts: &RenderOptions) -> String {
-    let line = "─".repeat(DIVIDER_WIDTH);
-    if opts.color {
-        format!("{}", line.with(Color::DarkGrey))
-    } else {
-        line
-    }
-}
-
+/// One ultra-compact row: `1 A Buy milk · 30m`. Completed / deleted rows get a
+/// leading `✓` / `✗` badge; active rows have none.
 pub fn format_list_row(task: &Task, opts: &RenderOptions) -> String {
     let est_str = format_est(task.est_secs);
-    let ord_str = task.ord.to_string();
     let text = truncate(&sanitize_for_terminal(&task.text), TEXT_W);
 
     let cat_letter = task.category.to_string();
@@ -108,34 +76,67 @@ pub fn format_list_row(task: &Task, opts: &RenderOptions) -> String {
         cat_letter
     };
 
-    let status_badge = status_badge(task.status, opts);
+    let badge = status_badge(task.status, opts);
+    let sep = if opts.color {
+        format!("{}", "·".with(Color::DarkGrey))
+    } else {
+        "·".to_string()
+    };
+    let est_styled = if opts.color {
+        format!("{}", est_str.with(Color::DarkGrey))
+    } else {
+        est_str
+    };
 
-    // The category cell is right-aligned to CAT_W, but the styled string contains
-    // ANSI escapes that throw off `:>w_cat$` width math; pad manually.
-    let cat_pad = " ".repeat(CAT_W.saturating_sub(1));
-    format!(
-        "  {status_badge}{:>w_id$}  {cat_pad}{cat_styled}  {:<w_text$}  {:>w_ord$}  {:>w_est$}",
-        task.id,
-        text,
-        ord_str,
-        est_str,
-        w_id = ID_W,
-        w_text = TEXT_W,
-        w_ord = ORD_W,
-        w_est = EST_W,
-    )
+    format!("{badge}{} {cat_styled} {text} {sep} {est_styled}", task.id)
 }
 
+/// Leading badge for non-active rows (`✓ ` / `✗ `); empty for active tasks so the
+/// common case stays as tight as possible.
 fn status_badge(status: Status, opts: &RenderOptions) -> String {
     let (marker, color) = match status {
-        Status::Active => ("  ", Color::Reset),
+        Status::Active => return String::new(),
         Status::Completed => ("✓ ", Color::Green),
         Status::SoftDeleted => ("✗ ", Color::DarkGrey),
     };
-    if !opts.color || status == Status::Active {
-        return marker.to_string();
+    if opts.color {
+        format!("{}", marker.with(color))
+    } else {
+        marker.to_string()
     }
-    format!("{}", marker.with(color))
+}
+
+/// Compact A+B effort summary used by the active-list footer and the TUI: the
+/// combined estimate of all active A and B tasks, plus the projected wall-clock
+/// finish time (`now` + that estimate). The finish time is `+`-prefixed when it
+/// lands on a later calendar day. `None` when there's no active A/B effort.
+pub fn estimate_summary(tasks: &[Task], now: DateTime<Local>) -> Option<String> {
+    let total: i64 = tasks
+        .iter()
+        .filter(|t| t.status == Status::Active && matches!(t.category, Category::A | Category::B))
+        .map(|t| t.est_secs.max(0))
+        .sum();
+    if total <= 0 {
+        return None;
+    }
+    let finish = now + Duration::seconds(total);
+    let marker = if finish.date_naive() > now.date_naive() {
+        "+"
+    } else {
+        ""
+    };
+    Some(format!(
+        "A+B {} · finish {marker}{}",
+        hhmm(total),
+        finish.format("%H:%M"),
+    ))
+}
+
+/// Format a duration (seconds) as `HH:MM`. Hours are not capped at 24 — a 30h
+/// total renders as `30:00`.
+fn hhmm(secs: i64) -> String {
+    let secs = secs.max(0);
+    format!("{:02}:{:02}", secs / 3600, (secs % 3600) / 60)
 }
 
 /// Strip ANSI escape sequences and unrenderable control bytes from user-supplied text
@@ -157,9 +158,10 @@ pub fn sanitize_for_terminal(s: &str) -> String {
     out
 }
 
-/// Canonical task ordering: by manual ord ascending, then by id as a tiebreaker.
-pub fn sort_key(t: &Task) -> (u32, u32) {
-    (t.ord, t.id)
+/// Canonical task ordering: by category (A, then B, then C), then by the
+/// per-category manual ord ascending, then by id as a tiebreaker.
+pub fn sort_key(t: &Task) -> (Category, u32, u32) {
+    (t.category, t.ord, t.id)
 }
 
 pub fn format_info(task: &Task, opts: &RenderOptions) -> String {
@@ -452,18 +454,16 @@ mod tests {
     }
 
     #[test]
-    fn format_list_includes_ord_column_header() {
-        let task = make_task(1, "Buy milk", Category::B, 1);
+    fn format_list_row_is_ultra_mini_and_has_no_header_or_ord() {
+        let task = make_task(1, "Buy milk", Category::A, 1);
         let opts = RenderOptions::no_color();
         let output = format_list(&[task], &opts);
-        assert!(output.contains("ID"));
-        assert!(output.contains("Description"));
-        assert!(output.contains("Ord"));
-        assert!(output.contains("Est"));
-        assert!(
-            !output.contains("Due"),
-            "list output must not mention Due:\n{output}"
-        );
+        // No table header / divider, and no Ord column.
+        assert!(!output.contains("Description"));
+        assert!(!output.contains("Ord"));
+        assert!(!output.contains('─'));
+        // Single compact row: `1 A Buy milk · 30m`.
+        assert!(output.contains("1 A Buy milk · 30m"), "got:\n{output}");
     }
 
     #[test]
@@ -478,16 +478,48 @@ mod tests {
     }
 
     #[test]
-    fn format_list_does_not_emit_overflow_marker() {
-        let tasks: Vec<Task> = (1..=10)
-            .map(|i| make_task(i, &format!("t{i}"), Category::B, i))
-            .collect();
+    fn format_list_sorts_by_category_then_ord() {
+        // Category beats ord: a B task with ord 1 still sorts after an A task with
+        // a higher ord.
+        let a = make_task(1, "alpha", Category::A, 5);
+        let b = make_task(2, "beta", Category::B, 1);
         let opts = RenderOptions::no_color();
-        let out = format_list(&tasks, &opts);
-        assert!(
-            !out.contains('+'),
-            "list view must never emit a +N hidden indicator:\n{out}"
-        );
+        let out = format_list(&[b, a], &opts);
+        assert!(out.find("alpha").unwrap() < out.find("beta").unwrap());
+    }
+
+    #[test]
+    fn estimate_summary_sums_only_active_a_and_b() {
+        use chrono::TimeZone;
+        let now = Local.with_ymd_and_hms(2026, 5, 31, 9, 0, 0).unwrap();
+        let mut a = make_task(1, "a", Category::A, 1); // 30m
+        a.est_secs = 3600; // 1h
+        let mut b = make_task(2, "b", Category::B, 1);
+        b.est_secs = 1800; // 30m
+        let mut c = make_task(3, "c", Category::C, 1);
+        c.est_secs = 7200; // ignored
+        let summary = estimate_summary(&[a, b, c], now).unwrap();
+        // 1h30m total -> 01:30, finish at 10:30 same day (no `+`).
+        assert_eq!(summary, "A+B 01:30 · finish 10:30");
+    }
+
+    #[test]
+    fn estimate_summary_next_day_gets_plus_prefix() {
+        use chrono::TimeZone;
+        let now = Local.with_ymd_and_hms(2026, 5, 31, 23, 0, 0).unwrap();
+        let mut a = make_task(1, "a", Category::A, 1);
+        a.est_secs = 2 * 3600 + 30 * 60; // 2h30m -> finishes 01:30 next day
+        let summary = estimate_summary(&[a], now).unwrap();
+        assert_eq!(summary, "A+B 02:30 · finish +01:30");
+    }
+
+    #[test]
+    fn estimate_summary_none_without_ab_effort() {
+        use chrono::TimeZone;
+        let now = Local.with_ymd_and_hms(2026, 5, 31, 9, 0, 0).unwrap();
+        let mut c = make_task(1, "c", Category::C, 1);
+        c.est_secs = 3600;
+        assert!(estimate_summary(&[c], now).is_none());
     }
 
     #[test]

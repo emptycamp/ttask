@@ -163,18 +163,37 @@ fn list_help_includes_examples_for_all_filters() {
 }
 
 #[test]
-fn list_output_includes_ord_column_header_not_due() {
+fn list_human_view_is_ultra_mini_no_header_no_ord() {
     let scope = StoreScope::new();
-    task(&scope).args(["add", "Active task"]).assert().success();
+    task(&scope)
+        .args(["add", "Active task", "c:a"])
+        .assert()
+        .success();
     task(&scope)
         .args(["list"])
         .assert()
         .success()
-        .stdout(contains("ID"))
-        .stdout(contains("Description"))
-        .stdout(contains("Ord"))
-        .stdout(contains("Est"))
+        // Compact single-line row, no table header / Ord column / Due.
+        .stdout(contains("1 A Active task · 30m"))
+        .stdout(predicates::str::contains("Description").not())
+        .stdout(predicates::str::contains("Ord").not())
         .stdout(predicates::str::contains("Due").not());
+}
+
+#[test]
+fn list_has_no_ab_estimate_footer() {
+    // The A+B estimate / finish-time summary is TUI-only; `task ls` must not show it.
+    let scope = StoreScope::new();
+    task(&scope)
+        .args(["add", "Plan", "c:a", "est:1h"])
+        .assert()
+        .success();
+    task(&scope)
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("A+B").not())
+        .stdout(predicates::str::contains("finish").not());
 }
 
 #[test]
@@ -192,10 +211,12 @@ fn list_does_not_show_day_headings() {
 #[test]
 fn list_does_not_show_hidden_indicator() {
     let scope = StoreScope::new();
-    // Many tasks; ensure no "+N" indicator appears.
+    // Many tasks; ensure no "+N" overflow indicator appears. Use category C so the
+    // A+B finish-time footer (which can legitimately carry a `+` for a next-day
+    // finish) doesn't enter the picture.
     for i in 0..10 {
         task(&scope)
-            .args(["add", &format!("task{i}")])
+            .args(["add", &format!("task{i}"), "c:c"])
             .assert()
             .success();
     }

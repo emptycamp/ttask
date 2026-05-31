@@ -27,6 +27,15 @@ pub struct ClearStats {
     pub events_cleared: u32,
 }
 
+/// A complete capture of the store's state (both databases + the event sequence
+/// counter). Produced by `Store::snapshot` and consumed by `Store::restore`.
+#[derive(Debug, Clone)]
+pub struct StoreSnapshot {
+    tasks: Vec<Task>,
+    events: Vec<(u64, HistoryEntry)>,
+    seq: u64,
+}
+
 /// Which kind of history event to record for a `mutate_task` call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MutateKind {
@@ -106,14 +115,15 @@ impl Store {
     }
 
     /// Allocate a new task ID and insert the task in a single write transaction.
+    /// `build` decides the task's category and ord (ord is per-category — the
+    /// caller computes it via `next_active_ord`).
     pub fn add_task_atomic<F>(&mut self, build: F, clock: &dyn Clock) -> Result<Task>
     where
-        F: FnOnce(TaskId, u32) -> Task,
+        F: FnOnce(TaskId) -> Task,
     {
         let mut txn = self.env.write_txn()?;
         let id = tasks::next_id(&txn, self.tasks_db)?;
-        let next_ord = tasks::next_active_ord(&txn, self.tasks_db)?;
-        let task = build(id, next_ord);
+        let task = build(id);
         tasks::put(&mut txn, self.tasks_db, &task)?;
         revert::push(
             &mut txn,
@@ -131,9 +141,9 @@ impl Store {
         tasks::next_id(&txn, self.tasks_db)
     }
 
-    pub fn next_active_ord(&self) -> Result<u32> {
+    pub fn next_active_ord(&self, category: crate::model::Category) -> Result<u32> {
         let txn = self.env.read_txn()?;
-        tasks::next_active_ord(&txn, self.tasks_db)
+        tasks::next_active_ord(&txn, self.tasks_db, category)
     }
 
     pub fn update_task(&mut self, task: Task) -> Result<()> {
@@ -266,19 +276,22 @@ impl Store {
         })
     }
 
-    /// Move `id` to manual order position `target_ord` (1-based), shifting other
-    /// active tasks to make room. No-op if `target_ord` is the task's current ord.
+    /// Move `id` to manual order position `target_ord` (1-based) **within its own
+    /// category**, shifting the other active tasks in that category to make room.
+    /// Order is per-category, so tasks in other categories are untouched. No-op if
+    /// `target_ord` is the task's current ord.
     pub fn reorder_task(&mut self, id: TaskId, target_ord: u32, clock: &dyn Clock) -> Result<()> {
         let before = self.get_task(id)?;
         if before.ord == target_ord {
             return Ok(());
         }
+        let category = before.category;
         let mut active: Vec<Task> = self
             .all_tasks()?
             .into_iter()
-            .filter(|t| t.status == crate::model::Status::Active)
+            .filter(|t| t.status == crate::model::Status::Active && t.category == category)
             .collect();
-        active.sort_by_key(|t| t.ord);
+        active.sort_by_key(|t| (t.ord, t.id));
 
         let new_orders = order::compute_reorder(&active, id, target_ord);
 
@@ -316,6 +329,43 @@ impl Store {
         }
         txn.commit()?;
         Ok(())
+    }
+
+    /// Capture the complete state of both databases (tasks + history + the event
+    /// sequence counter). Pairs with `restore` to back the TUI's in-session
+    /// undo/redo: every mutation snapshots first, and undo/redo just restore a
+    /// captured snapshot. Restoring rewinds history too, so an undone edit leaves
+    /// no stale event behind.
+    pub fn snapshot(&self) -> Result<StoreSnapshot> {
+        let txn = self.env.read_txn()?;
+        Ok(StoreSnapshot {
+            tasks: tasks::all(&txn, self.tasks_db)?,
+            events: revert::list(&txn, self.revert_db)?,
+            seq: revert::seq(&txn, self.meta_db)?,
+        })
+    }
+
+    /// Overwrite both databases to exactly match `snap`. See `snapshot`.
+    pub fn restore(&mut self, snap: &StoreSnapshot) -> Result<()> {
+        let mut txn = self.env.write_txn()?;
+        self.tasks_db.clear(&mut txn)?;
+        for t in &snap.tasks {
+            tasks::put(&mut txn, self.tasks_db, t)?;
+        }
+        self.revert_db.clear(&mut txn)?;
+        for (id, entry) in &snap.events {
+            self.revert_db.put(&mut txn, id, entry).map_err(Error::Db)?;
+        }
+        revert::set_seq(&mut txn, self.meta_db, snap.seq)?;
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// Current value of the history event-sequence counter. The TUI uses this as a
+    /// cheap "did a mutation actually happen" probe around undo checkpoints.
+    pub fn current_seq(&self) -> Result<u64> {
+        let txn = self.env.read_txn()?;
+        revert::seq(&txn, self.meta_db)
     }
 
     pub fn history(&self) -> Result<Vec<(u64, HistoryEntry)>> {

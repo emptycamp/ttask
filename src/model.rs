@@ -5,7 +5,10 @@ pub type TaskId = u32;
 
 /// Task category. Used both to bucket tasks visually and to drive the
 /// auto-deletion clock — see `src/store/gc.rs` for the per-category cutoffs.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// The derived `Ord` (A < B < C) is the primary list sort key: tasks group by
+/// category, and within a category by their per-category manual `ord`.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Category {
     A,
     #[default]

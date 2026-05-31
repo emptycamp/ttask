@@ -1,5 +1,4 @@
 pub mod events;
-pub mod pending;
 pub mod render;
 
 use crate::clock::Clock;
@@ -7,8 +6,8 @@ use crate::editor::TaskEditor;
 use crate::error::{Error, Result};
 use crate::format::sort_key;
 use crate::model::{Category, Status, Task, TaskId};
-use crate::store::Store;
-use crate::tui::events::{Action, PendingChange};
+use crate::store::{Store, StoreSnapshot};
+use crate::tui::events::Action;
 use crossterm::{
     event::{self, Event, KeyEventKind},
     execute,
@@ -16,7 +15,6 @@ use crossterm::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
-use std::collections::HashMap;
 use std::io;
 use std::time::{Duration as StdDuration, Instant};
 
@@ -29,8 +27,6 @@ const EXTERNAL_REFRESH_MS: u64 = 500;
 pub struct App {
     pub tasks: Vec<Task>,
     pub cursor: usize,
-    pub pending: HashMap<TaskId, Vec<PendingChange>>,
-    pub should_quit: bool,
     /// `Some(buf)` while the user is editing the search prompt; `None` when not in
     /// search-input mode. While editing, the in-progress buffer is also the live
     /// filter applied to the displayed list.
@@ -38,6 +34,9 @@ pub struct App {
     /// The committed filter — survives across input/exit transitions. Empty means
     /// no filter is applied. Matches case-insensitively against task text.
     pub search_filter: String,
+    /// Last user-facing status note (e.g. "undone", "nothing to redo"), shown in
+    /// the footer until the next action.
+    pub status: Option<String>,
 }
 
 impl App {
@@ -45,10 +44,9 @@ impl App {
         Self {
             tasks,
             cursor: 0,
-            pending: HashMap::new(),
-            should_quit: false,
             search_input: None,
             search_filter: String::new(),
+            status: None,
         }
     }
 
@@ -83,6 +81,25 @@ impl App {
     }
 }
 
+/// In-session undo/redo of immediate store mutations. Each entry is a full store
+/// snapshot taken just *before* a mutation; undo restores the previous snapshot
+/// (capturing the current state for redo). Both stacks are dropped when the TUI
+/// exits, so once the user reopens `task` the only way to roll back further is
+/// `task history`.
+struct UndoStacks {
+    undo: Vec<StoreSnapshot>,
+    redo: Vec<StoreSnapshot>,
+}
+
+impl UndoStacks {
+    fn new() -> Self {
+        Self {
+            undo: Vec::new(),
+            redo: Vec::new(),
+        }
+    }
+}
+
 pub fn run(store: &mut Store, clock: &dyn Clock, editor: &dyn TaskEditor) -> Result<()> {
     let mut app = App::new(load_active_tasks(store)?);
 
@@ -93,10 +110,7 @@ pub fn run(store: &mut Store, clock: &dyn Clock, editor: &dyn TaskEditor) -> Res
 
     leave_screen(&mut terminal);
 
-    result?;
-
-    pending::apply(&app.pending, store, clock)?;
-    Ok(())
+    result
 }
 
 fn load_active_tasks(store: &Store) -> Result<Vec<Task>> {
@@ -133,6 +147,7 @@ fn run_loop(
     clock: &dyn Clock,
     editor: &dyn TaskEditor,
 ) -> Result<()> {
+    let mut stacks = UndoStacks::new();
     let mut last_external_refresh = Instant::now();
     loop {
         if app.search_input.is_none()
@@ -156,29 +171,130 @@ fn run_loop(
             Action::Continue => {}
             Action::Quit => return Ok(()),
             Action::EditTask(id) => {
-                let edit_result =
-                    with_paused_terminal(terminal, || edit_existing(id, store, clock, editor));
-                edit_result?;
+                app.status = None;
+                run_mutation(store, &mut stacks, |store| {
+                    with_paused_terminal(terminal, || edit_existing(id, store, clock, editor))
+                })?;
                 refresh_tasks(app, store)?;
             }
             Action::AddTask => {
-                let add_result = with_paused_terminal(terminal, || add_new(store, clock, editor));
-                add_result?;
+                app.status = None;
+                let new_id = run_mutation(store, &mut stacks, |store| {
+                    with_paused_terminal(terminal, || add_new(store, clock, editor))
+                })?;
                 refresh_tasks(app, store)?;
+                // Land the cursor on the freshly created task so it can be acted
+                // on immediately without navigating.
+                if let Some(id) = new_id {
+                    if let Some(pos) = app.filtered_tasks().iter().position(|t| t.id == id) {
+                        app.cursor = pos;
+                    }
+                }
             }
             Action::ReorderCursor(target_ord) => {
                 if let Some(id) = app.cursor_task().map(|t| t.id) {
-                    store.reorder_task(id, target_ord, clock)?;
+                    app.status = None;
+                    run_mutation(store, &mut stacks, |store| {
+                        store.reorder_task(id, target_ord, clock)
+                    })?;
                     refresh_tasks(app, store)?;
-                    // Keep the cursor on the moved task at its new position.
-                    let pos = app.filtered_tasks().iter().position(|t| t.id == id);
-                    if let Some(p) = pos {
+                    if let Some(p) = app.filtered_tasks().iter().position(|t| t.id == id) {
                         app.cursor = p;
                     }
                 }
             }
+            Action::SetCategory(id, category) => {
+                app.status = None;
+                run_mutation(store, &mut stacks, |store| {
+                    set_category(id, category, store, clock)
+                })?;
+                refresh_tasks(app, store)?;
+            }
+            Action::Complete(id) => {
+                app.status = None;
+                run_mutation(store, &mut stacks, |store| {
+                    crate::commands::complete::run(id, store, clock)
+                })?;
+                refresh_tasks(app, store)?;
+            }
+            Action::Delete(id) => {
+                app.status = None;
+                run_mutation(store, &mut stacks, |store| {
+                    crate::commands::delete::run(id, store, clock)
+                })?;
+                refresh_tasks(app, store)?;
+            }
+            Action::Undo => {
+                undo(store, &mut stacks, app)?;
+            }
+            Action::Redo => {
+                redo(store, &mut stacks, app)?;
+            }
         }
     }
+}
+
+/// Run a store mutation, recording an undo checkpoint if it actually changed
+/// anything. Every TUI mutation pushes a history event, so a bump in the event
+/// sequence is a reliable "something happened" signal — cheaper than diffing the
+/// whole snapshot and it skips no-op edits (e.g. the user cancelled the editor).
+fn run_mutation<F, T>(store: &mut Store, stacks: &mut UndoStacks, f: F) -> Result<T>
+where
+    F: FnOnce(&mut Store) -> Result<T>,
+{
+    let before = store.snapshot()?;
+    let seq_before = store.current_seq()?;
+    let out = f(store)?;
+    if store.current_seq()? != seq_before {
+        stacks.undo.push(before);
+        stacks.redo.clear();
+    }
+    Ok(out)
+}
+
+fn undo(store: &mut Store, stacks: &mut UndoStacks, app: &mut App) -> Result<()> {
+    match stacks.undo.pop() {
+        Some(prev) => {
+            let current = store.snapshot()?;
+            store.restore(&prev)?;
+            stacks.redo.push(current);
+            app.status = Some("undone".into());
+            refresh_tasks(app, store)?;
+        }
+        None => app.status = Some("nothing to undo".into()),
+    }
+    Ok(())
+}
+
+fn redo(store: &mut Store, stacks: &mut UndoStacks, app: &mut App) -> Result<()> {
+    match stacks.redo.pop() {
+        Some(next) => {
+            let current = store.snapshot()?;
+            store.restore(&next)?;
+            stacks.undo.push(current);
+            app.status = Some("redone".into());
+            refresh_tasks(app, store)?;
+        }
+        None => app.status = Some("nothing to redo".into()),
+    }
+    Ok(())
+}
+
+fn set_category(
+    id: TaskId,
+    category: Category,
+    store: &mut Store,
+    clock: &dyn Clock,
+) -> Result<()> {
+    let before = store.get_task(id)?;
+    if before.category == category {
+        return Ok(());
+    }
+    let mut after = before.clone();
+    after.category = category;
+    // A category change is a user touch, so reset the GC stale-clock like an edit.
+    after.updated_at = clock.now();
+    store.update_task_with_revert(before, after, clock)
 }
 
 fn with_paused_terminal<F, T>(
@@ -208,37 +324,28 @@ fn edit_existing(
     editor: &dyn TaskEditor,
 ) -> Result<()> {
     let task = store.get_task(id)?;
-    let mut baseline = task.clone();
+    let baseline = task.clone();
+    // The edit TUI only ever changes text and estimate, so a single mutate covers
+    // it. (Category and ord are changed from the main view, not the editor.)
     let mut save = |proposed: Task| -> Result<Task> {
         if proposed == baseline {
             return Ok(proposed);
         }
-        // Ord changes go through `reorder_task` so other tasks shift correctly.
-        // Other fields flow through update_task_with_revert.
-        let mut for_update = proposed.clone();
-        let target_ord_change = if proposed.ord != baseline.ord {
-            Some(proposed.ord)
-        } else {
-            None
-        };
-        if target_ord_change.is_some() {
-            for_update.ord = baseline.ord;
-        }
-        if for_update != baseline {
-            store.update_task_with_revert(baseline.clone(), for_update.clone(), clock)?;
-        }
-        if let Some(target_ord) = target_ord_change {
-            store.reorder_task(id, target_ord, clock)?;
-        }
-        baseline = store.get_task(id)?;
-        Ok(baseline.clone())
+        store.update_task_with_revert(baseline.clone(), proposed.clone(), clock)?;
+        store.get_task(id)
     };
     editor.edit(&task, &mut save)
 }
 
-fn add_new(store: &mut Store, clock: &dyn Clock, editor: &dyn TaskEditor) -> Result<()> {
+/// Returns the id of the created task, or `None` if the editor was cancelled
+/// before anything was saved (so the caller can move the cursor onto it).
+fn add_new(
+    store: &mut Store,
+    clock: &dyn Clock,
+    editor: &dyn TaskEditor,
+) -> Result<Option<TaskId>> {
     let now = clock.now();
-    let next_ord = store.next_active_ord()?;
+    let next_ord = store.next_active_ord(Category::B)?;
     let template = Task {
         id: 0,
         text: String::new(),
@@ -252,33 +359,34 @@ fn add_new(store: &mut Store, clock: &dyn Clock, editor: &dyn TaskEditor) -> Res
         deleted_at: None,
     };
     let mut baseline: Option<Task> = None;
-    let mut save = |proposed: Task| -> Result<Task> {
-        match &baseline {
-            None => {
-                let mut t = proposed;
-                t.id = store.next_id()?;
-                let created = store.add_task_with_revert(t, clock)?;
-                baseline = Some(created.clone());
-                Ok(created)
-            }
-            Some(prev) => {
-                if &proposed == prev {
-                    return Ok(proposed);
+    {
+        let mut save = |proposed: Task| -> Result<Task> {
+            match &baseline {
+                None => {
+                    let mut t = proposed;
+                    t.id = store.next_id()?;
+                    let created = store.add_task_with_revert(t, clock)?;
+                    baseline = Some(created.clone());
+                    Ok(created)
                 }
-                store.update_task_with_revert(prev.clone(), proposed.clone(), clock)?;
-                baseline = Some(proposed.clone());
-                Ok(proposed)
+                Some(prev) => {
+                    if &proposed == prev {
+                        return Ok(proposed);
+                    }
+                    store.update_task_with_revert(prev.clone(), proposed.clone(), clock)?;
+                    baseline = Some(proposed.clone());
+                    Ok(proposed)
+                }
             }
-        }
-    };
-    editor.edit(&template, &mut save)
+        };
+        editor.edit(&template, &mut save)?;
+    }
+    Ok(baseline.map(|t| t.id))
 }
 
 fn refresh_tasks(app: &mut App, store: &Store) -> Result<()> {
     let cursor_id = app.cursor_task().map(|t| t.id);
     app.tasks = load_active_tasks(store)?;
-    let active_ids: std::collections::HashSet<TaskId> = app.tasks.iter().map(|t| t.id).collect();
-    app.pending.retain(|id, _| active_ids.contains(id));
     if let Some(id) = cursor_id {
         if let Some(pos) = app.filtered_tasks().iter().position(|t| t.id == id) {
             app.cursor = pos;
@@ -310,6 +418,66 @@ mod tests {
 
     fn make_app(store: &Store) -> App {
         App::new(load_active_tasks(store).unwrap())
+    }
+
+    /// Editor stub that saves a single task with the given text (used to drive
+    /// `add_new` without a TTY).
+    struct SavingEditor {
+        text: String,
+    }
+    impl TaskEditor for SavingEditor {
+        fn edit(&self, task: &Task, save: &mut crate::editor::Saver<'_>) -> Result<()> {
+            let mut t = task.clone();
+            t.text = self.text.clone();
+            save(t)?;
+            Ok(())
+        }
+    }
+
+    /// Editor stub that cancels without saving.
+    struct CancellingEditor;
+    impl TaskEditor for CancellingEditor {
+        fn edit(&self, _task: &Task, _save: &mut crate::editor::Saver<'_>) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn add_new_returns_created_task_id() {
+        let (_dir, mut store, clock, _id) = open_store_with_task("first");
+        let editor = SavingEditor {
+            text: "second".into(),
+        };
+        let new_id = add_new(&mut store, &clock, &editor).unwrap();
+        let id = new_id.expect("a task should have been created");
+        assert_eq!(store.get_task(id).unwrap().text, "second");
+    }
+
+    #[test]
+    fn add_new_returns_none_when_editor_cancels() {
+        let (_dir, mut store, clock, _id) = open_store_with_task("first");
+        assert!(add_new(&mut store, &clock, &CancellingEditor)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn cursor_lands_on_newly_added_task() {
+        // Existing task sorts before the new one (same category B, lower ord), so
+        // the cursor only ends on the new task if we explicitly move it there.
+        let (_dir, mut store, clock, _id) = open_store_with_task("aaa first");
+        let mut app = make_app(&store);
+        let editor = SavingEditor {
+            text: "zzz second".into(),
+        };
+        let new_id = add_new(&mut store, &clock, &editor).unwrap();
+        refresh_tasks(&mut app, &store).unwrap();
+        if let Some(id) = new_id {
+            if let Some(pos) = app.filtered_tasks().iter().position(|t| t.id == id) {
+                app.cursor = pos;
+            }
+        }
+        assert_eq!(app.cursor_task().map(|t| t.id), new_id);
     }
 
     #[test]
@@ -345,15 +513,49 @@ mod tests {
     }
 
     #[test]
-    fn refresh_tasks_drops_pending_changes_for_vanished_tasks() {
+    fn run_mutation_records_undo_only_when_state_changes() {
+        let (_dir, mut store, clock, id) = open_store_with_task("chores");
+        let mut stacks = UndoStacks::new();
+
+        // A real mutation (delete) should record an undo checkpoint.
+        run_mutation(&mut store, &mut stacks, |s| {
+            crate::commands::delete::run(id, s, &clock)
+        })
+        .unwrap();
+        assert_eq!(stacks.undo.len(), 1);
+
+        // A no-op closure should not.
+        run_mutation(&mut store, &mut stacks, |_s| Ok(())).unwrap();
+        assert_eq!(stacks.undo.len(), 1);
+    }
+
+    #[test]
+    fn undo_then_redo_round_trips_a_delete() {
         let (_dir, mut store, clock, id) = open_store_with_task("chores");
         let mut app = make_app(&store);
-        app.pending
-            .entry(id)
-            .or_default()
-            .push(crate::tui::events::PendingChange::ToggleComplete(id));
-        crate::commands::delete::run(id, &mut store, &clock).unwrap();
+        let mut stacks = UndoStacks::new();
+
+        run_mutation(&mut store, &mut stacks, |s| {
+            crate::commands::delete::run(id, s, &clock)
+        })
+        .unwrap();
         refresh_tasks(&mut app, &store).unwrap();
-        assert!(app.pending.is_empty());
+        assert!(app.tasks.is_empty(), "task should be gone after delete");
+
+        undo(&mut store, &mut stacks, &mut app).unwrap();
+        assert_eq!(app.tasks.len(), 1, "undo should bring the task back");
+        assert_eq!(store.get_task(id).unwrap().status, Status::Active);
+
+        redo(&mut store, &mut stacks, &mut app).unwrap();
+        assert!(app.tasks.is_empty(), "redo should re-apply the delete");
+    }
+
+    #[test]
+    fn undo_with_empty_stack_sets_status_note() {
+        let (_dir, mut store, _clock, _id) = open_store_with_task("chores");
+        let mut app = make_app(&store);
+        let mut stacks = UndoStacks::new();
+        undo(&mut store, &mut stacks, &mut app).unwrap();
+        assert_eq!(app.status.as_deref(), Some("nothing to undo"));
     }
 }

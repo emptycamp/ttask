@@ -8,6 +8,9 @@ on:
 permissions:
   contents: write
 
+env:
+  BINARY_NAME: task.exe
+
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -36,7 +39,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build-windows-asset:
-    name: Build and upload tt.exe
+    name: Build and upload binaries
     runs-on: windows-latest
     needs: release
     if: needs.release.outputs.published == 'true'
@@ -52,10 +55,10 @@ jobs:
       - name: Build release binary
         run: cargo build --release --locked
 
-      - name: Upload tt.exe to release
+      - name: Upload ${{ env.BINARY_NAME }} to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.release.outputs.tag }}
-          files: target/release/task.exe
+          files: target/release/${{ env.BINARY_NAME }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

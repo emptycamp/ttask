@@ -8,10 +8,6 @@ default-run = "task"
 name = "task"
 path = "src/main.rs"
 
-[[bin]]
-name = "fake-editor"
-path = "tests/support/fake_editor_bin.rs"
-
 [lib]
 name = "task"
 path = "src/lib.rs"

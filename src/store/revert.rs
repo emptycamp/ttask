@@ -177,6 +177,18 @@ pub fn list(txn: &RoTxn<'_>, revert_db: RevertDb) -> Result<Vec<(u64, HistoryEnt
     revert_db.iter(txn)?.map(|r| r.map_err(Error::Db)).collect()
 }
 
+/// Current value of the monotonic event-sequence counter (0 if none yet). Used by
+/// the store snapshot/restore machinery that backs the TUI's undo/redo.
+pub fn seq(txn: &RoTxn<'_>, meta_db: MetaDb) -> Result<u64> {
+    Ok(meta_db.get(txn, SEQ_KEY)?.unwrap_or(0))
+}
+
+/// Overwrite the event-sequence counter — used when restoring a snapshot so new
+/// events resume from exactly where the snapshot left off.
+pub fn set_seq(txn: &mut RwTxn<'_>, meta_db: MetaDb, value: u64) -> Result<()> {
+    meta_db.put(txn, SEQ_KEY, &value).map_err(Error::Db)
+}
+
 pub fn get(txn: &RoTxn<'_>, revert_db: RevertDb, id: u64) -> Result<Option<HistoryEntry>> {
     Ok(revert_db.get(txn, &id)?)
 }

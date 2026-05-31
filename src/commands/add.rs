@@ -19,19 +19,20 @@ pub fn run(args: &[String], store: &mut Store, clock: &dyn Clock) -> Result<Task
     let category = category.unwrap_or(Category::B);
     let est_secs = est_secs.unwrap_or(1800);
 
-    // Snapshot the active tasks *before* the add so we can splice the new one in at
-    // the requested ord, shifting the bystanders. Without an explicit ord the task
-    // is appended to the end.
+    // Order is per-category. Snapshot the active tasks *in this category* before the
+    // add so we can splice the new one in at the requested ord, shifting only that
+    // category's bystanders. Without an explicit ord the task is appended to the end
+    // of its category.
     let active_before: Vec<Task> = store
         .all_tasks()?
         .into_iter()
-        .filter(|t| t.status == Status::Active)
+        .filter(|t| t.status == Status::Active && t.category == category)
         .collect();
-    let next_default_ord = store.next_active_ord()?;
+    let next_default_ord = store.next_active_ord(category)?;
     let requested_ord = ord.unwrap_or(next_default_ord);
 
     let created = store.add_task_atomic(
-        |id, _| Task {
+        |id| Task {
             id,
             text,
             category,
@@ -47,10 +48,10 @@ pub fn run(args: &[String], store: &mut Store, clock: &dyn Clock) -> Result<Task
     )?;
 
     if ord.is_some() {
-        // Shift the bystanders so the new task lands exactly at requested_ord. The
-        // `compute_reorder` helper takes the full new task set sorted by current
-        // ord — the new task is currently at `requested_ord`, possibly colliding
-        // with an existing task at that ord.
+        // Shift the bystanders so the new task lands exactly at requested_ord within
+        // its category. `compute_reorder` takes the category's task set sorted by
+        // current ord — the new task is currently at `requested_ord`, possibly
+        // colliding with an existing task at that ord.
         let mut active: Vec<Task> = active_before;
         active.push(created.clone());
         active.sort_by_key(|t| (t.ord, t.id));
@@ -137,6 +138,36 @@ mod tests {
         assert_eq!(t2.id, 2);
         assert_eq!(t1.ord, 1);
         assert_eq!(t2.ord, 2);
+    }
+
+    #[test]
+    fn add_orders_are_per_category() {
+        let dir = tempdir().unwrap();
+        let mut store = open_store(dir.path());
+        let clock = make_clock();
+        // Two B tasks, then an A task: A starts its own sequence at 1.
+        let b1 = run(&["b one".into()], &mut store, &clock).unwrap();
+        let b2 = run(&["b two".into()], &mut store, &clock).unwrap();
+        let a1 = run(&["a one".into(), "c:a".into()], &mut store, &clock).unwrap();
+        assert_eq!(b1.ord, 1);
+        assert_eq!(b2.ord, 2);
+        assert_eq!(a1.category, Category::A);
+        assert_eq!(a1.ord, 1);
+    }
+
+    #[test]
+    fn add_with_bare_trailing_duration_sets_estimate() {
+        let dir = tempdir().unwrap();
+        let mut store = open_store(dir.path());
+        let clock = make_clock();
+        let t = run(
+            &["Buy".into(), "milk".into(), "30m".into()],
+            &mut store,
+            &clock,
+        )
+        .unwrap();
+        assert_eq!(t.text, "Buy milk");
+        assert_eq!(t.est_secs, 1800);
     }
 
     #[test]

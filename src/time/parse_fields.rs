@@ -109,12 +109,56 @@ pub fn parse_task_fields(args: &[String]) -> Result<ParsedFields> {
         Some(trimmed.to_string())
     };
 
+    // A bare duration token at the start or end of the text (e.g. `Buy milk 30m`)
+    // is treated as the estimate — same shorthand the edit TUI uses. An explicit
+    // `est:` always wins, so only fill in the estimate when it wasn't set.
+    let (text, est_secs) = match (text, est_secs) {
+        (Some(t), None) => match split_estimate(&t) {
+            (stripped, Some(secs)) => (Some(stripped), Some(secs)),
+            (_, None) => (Some(t), None),
+        },
+        (t, e) => (t, e),
+    };
+
     Ok(ParsedFields {
         text,
         category,
         ord,
         est_secs,
     })
+}
+
+/// Pull a duration token off the start or end of `text`, if one is present.
+/// Returns the remaining text and the matched estimate in seconds.
+///
+/// A token only counts when it contains both a digit and a unit letter, so
+/// `30m` / `4.5h` match but a bare number (`5`) or a plain word (`milk`) stay in
+/// the text. A trailing token wins over a leading one. Used by both `task add`
+/// and the edit TUI so the shorthand behaves identically in both.
+pub fn split_estimate(text: &str) -> (String, Option<i64>) {
+    let trimmed = text.trim();
+    let tokens: Vec<&str> = trimmed.split_whitespace().collect();
+    // Need at least one text token besides the duration — never reduce the text
+    // to empty just because the whole input looks like a duration.
+    if tokens.len() < 2 {
+        return (trimmed.to_string(), None);
+    }
+    if let Some(secs) = duration_token_secs(tokens[tokens.len() - 1]) {
+        return (tokens[..tokens.len() - 1].join(" "), Some(secs));
+    }
+    if let Some(secs) = duration_token_secs(tokens[0]) {
+        return (tokens[1..].join(" "), Some(secs));
+    }
+    (trimmed.to_string(), None)
+}
+
+fn duration_token_secs(tok: &str) -> Option<i64> {
+    let has_digit = tok.chars().any(|c| c.is_ascii_digit());
+    let has_unit = tok.chars().any(|c| c.is_ascii_alphabetic());
+    if !has_digit || !has_unit {
+        return None;
+    }
+    parse_duration(tok).ok().map(|d| d.num_seconds())
 }
 
 fn parse_category(value: &str) -> Result<Category> {
@@ -253,5 +297,49 @@ mod tests {
         let p = parse(&["c:a"]).unwrap();
         assert!(p.text.is_none());
         assert_eq!(p.category, Some(Category::A));
+    }
+
+    #[test]
+    fn trailing_bare_duration_becomes_estimate() {
+        let p = parse(&["Buy", "milk", "30m"]).unwrap();
+        assert_eq!(p.text.as_deref(), Some("Buy milk"));
+        assert_eq!(p.est_secs, Some(1800));
+    }
+
+    #[test]
+    fn leading_bare_duration_becomes_estimate() {
+        let p = parse(&["4.5h", "plan", "sprint"]).unwrap();
+        assert_eq!(p.text.as_deref(), Some("plan sprint"));
+        assert_eq!(p.est_secs, Some(4 * 3600 + 1800));
+    }
+
+    #[test]
+    fn explicit_est_wins_over_bare_token() {
+        let p = parse(&["Buy", "milk", "30m", "est:1h"]).unwrap();
+        // est: was set explicitly, so the trailing 30m stays as text.
+        assert_eq!(p.est_secs, Some(3600));
+        assert_eq!(p.text.as_deref(), Some("Buy milk 30m"));
+    }
+
+    #[test]
+    fn bare_number_without_unit_stays_text() {
+        let p = parse(&["Read", "5"]).unwrap();
+        assert_eq!(p.text.as_deref(), Some("Read 5"));
+        assert_eq!(p.est_secs, None);
+    }
+
+    #[test]
+    fn single_duration_token_is_text_not_estimate() {
+        // Nothing left if we stripped it, so it stays text.
+        let p = parse(&["30m"]).unwrap();
+        assert_eq!(p.text.as_deref(), Some("30m"));
+        assert_eq!(p.est_secs, None);
+    }
+
+    #[test]
+    fn split_estimate_prefers_trailing() {
+        let (text, est) = split_estimate("1h some task 30m");
+        assert_eq!(text, "1h some task");
+        assert_eq!(est, Some(1800));
     }
 }

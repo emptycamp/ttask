@@ -29,14 +29,19 @@ Add a new task.
 
 Examples:
   task add Buy milk
+  task add Buy milk 30m
   task add Read book c:a est:1h
   task add Plan sprint c:b est:2h ord:1
   task add \"Quick chore\" c:c
 
 Fields you can set inline:
   c:a | c:b | c:c                category (A, B, or C; `p:` works as a legacy alias)
-  ord:N                          manual order (1-based; insert at position N)
+  ord:N                          manual order (1-based; insert at position N within the category)
   est:30m | est:1h               estimated effort
+  30m | 4.5h (bare token)        a duration at the start/end of the text sets the
+                                 estimate too (est: wins if both are given)
+
+Order is tracked per-category: each of A, B, and C has its own 1-based sequence.
 
 Auto-deletion by category (working days only, Mon–Fri; weekends are skipped):
   A    never auto-deleted
@@ -49,7 +54,8 @@ Editing the task (text, category, ord, est) resets the clock.
     #[command(aliases = ["ls"])]
     #[command(group(ArgGroup::new("filter").args(["active", "completed", "deleted", "all"]).multiple(false)))]
     #[command(long_about = "\
-List tasks. By default shows only active tasks, sorted by manual order (Ord).
+List tasks. By default shows only active tasks, grouped by category (A, then B,
+then C) and ordered within each category by its manual order.
 
 Examples:
   task list                       # active tasks (default)
@@ -78,14 +84,18 @@ Examples:
     #[command(long_about = "\
 Edit an existing task.
 
-With no field args, opens the built-in form editor inside the terminal. The form
-editor requires a real TTY; in scripts or piped contexts, pass field args
-(c:/ord:/est:/text) directly.
+With no field args, opens the built-in text editor inside the terminal: a single
+input pre-filled with the task text. You edit the text, and a duration token at
+the start or end (e.g. `Buy milk 45m`) sets the estimate. Enter saves, Esc
+discards. Category and ord are changed from the main `task` view or via args, not
+in the editor. The editor requires a real TTY; in scripts or piped contexts, pass
+field args (c:/ord:/est:/text) directly.
 
 Examples:
-  task edit 3                       # open the form editor in this terminal
+  task edit 3                       # open the text editor in this terminal
   task edit 3 c:a                   # set category via args (scriptable)
   task edit 3 New text              # change text via args
+  task edit 3 New text 45m          # change text and set estimate (bare token)
   task edit 3 ord:1 est:30m         # move to first position and update estimate
 ")]
     Edit { id: TaskId, args: Vec<String> },

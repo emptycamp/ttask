@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::model::{Status, Task, TaskId};
+use crate::model::{Category, Status, Task, TaskId};
 use crate::store::codec::Bincode;
 use heed::types::U32;
 use heed::{Database, RwTxn};
@@ -18,13 +18,14 @@ pub fn next_id(txn: &heed::RoTxn<'_>, db: TasksDb) -> Result<TaskId> {
     Ok(expected)
 }
 
-/// Next available ord for an active task — one greater than the max active ord, or
-/// 1 if there are no active tasks yet.
-pub fn next_active_ord(txn: &heed::RoTxn<'_>, db: TasksDb) -> Result<u32> {
+/// Next available ord for an active task in `category` — one greater than the max
+/// active ord within that category, or 1 if the category has no active tasks yet.
+/// Order is tracked per-category, so each category has its own 1-based sequence.
+pub fn next_active_ord(txn: &heed::RoTxn<'_>, db: TasksDb, category: Category) -> Result<u32> {
     let mut max_ord: u32 = 0;
     for result in db.iter(txn)? {
         let (_, t) = result?;
-        if t.status == Status::Active && t.ord > max_ord {
+        if t.status == Status::Active && t.category == category && t.ord > max_ord {
             max_ord = t.ord;
         }
     }
@@ -107,7 +108,7 @@ mod tests {
     fn next_active_ord_starts_at_one_when_empty() {
         let dir = tempdir().unwrap();
         let store = Store::open(dir.path()).unwrap();
-        assert_eq!(store.next_active_ord().unwrap(), 1);
+        assert_eq!(store.next_active_ord(Category::B).unwrap(), 1);
     }
 
     #[test]
@@ -123,16 +124,30 @@ mod tests {
         t.status = Status::SoftDeleted;
         store.add_task(t).unwrap();
         // No active tasks — next ord should still be 1.
-        assert_eq!(store.next_active_ord().unwrap(), 1);
+        assert_eq!(store.next_active_ord(Category::B).unwrap(), 1);
     }
 
     #[test]
-    fn next_active_ord_extends_above_max_active() {
+    fn next_active_ord_extends_above_max_active_in_category() {
         let dir = tempdir().unwrap();
         let mut store = Store::open(dir.path()).unwrap();
         let mut t = make_task(1);
         t.ord = 3;
+        t.category = Category::B;
         store.add_task(t).unwrap();
-        assert_eq!(store.next_active_ord().unwrap(), 4);
+        assert_eq!(store.next_active_ord(Category::B).unwrap(), 4);
+    }
+
+    #[test]
+    fn next_active_ord_is_per_category() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        let mut a = make_task(1);
+        a.ord = 2;
+        a.category = Category::A;
+        store.add_task(a).unwrap();
+        // B has no tasks yet, so its sequence still starts at 1.
+        assert_eq!(store.next_active_ord(Category::A).unwrap(), 3);
+        assert_eq!(store.next_active_ord(Category::B).unwrap(), 1);
     }
 }

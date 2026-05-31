@@ -2,21 +2,23 @@ use crate::model::{Category, TaskId};
 use crate::tui::App;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum PendingChange {
-    ToggleComplete(TaskId),
-    ToggleDelete(TaskId),
-    SetCategory(TaskId, Category),
-}
-
+/// What the run-loop should do in response to a key. Every variant that names a
+/// task triggers an **immediate** store mutation (applied right away, not on
+/// quit) that the run-loop records on the undo stack so `u` / `r` can reverse it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Continue,
     Quit,
     EditTask(TaskId),
     AddTask,
-    /// User typed a 1-9 digit: move the cursor task to that 1-based position.
+    /// User typed a 1-9 digit: move the cursor task to that 1-based position
+    /// within its category.
     ReorderCursor(u32),
+    SetCategory(TaskId, Category),
+    Complete(TaskId),
+    Delete(TaskId),
+    Undo,
+    Redo,
 }
 
 pub fn handle(app: &mut App, key: KeyEvent) -> Action {
@@ -51,37 +53,43 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Action {
         (KeyCode::Char('a'), KeyModifiers::NONE) => {
             return Action::AddTask;
         }
-        (KeyCode::Char('c'), KeyModifiers::NONE) => {
-            if let Some(id) = cursor_id {
-                toggle_change(app, PendingChange::ToggleComplete(id));
-            }
-        }
-        (KeyCode::Char('d'), KeyModifiers::NONE) => {
-            if let Some(id) = cursor_id {
-                toggle_change(app, PendingChange::ToggleDelete(id));
-            }
-        }
         (KeyCode::Char('e'), KeyModifiers::NONE) => {
             if let Some(id) = cursor_id {
                 return Action::EditTask(id);
             }
         }
+        (KeyCode::Char('c'), KeyModifiers::NONE) => {
+            if let Some(id) = cursor_id {
+                return Action::Complete(id);
+            }
+        }
+        (KeyCode::Char('d'), KeyModifiers::NONE) => {
+            if let Some(id) = cursor_id {
+                return Action::Delete(id);
+            }
+        }
+        (KeyCode::Char('u'), KeyModifiers::NONE) => {
+            return Action::Undo;
+        }
+        (KeyCode::Char('r'), KeyModifiers::NONE) => {
+            return Action::Redo;
+        }
         (KeyCode::Char('A'), KeyModifiers::SHIFT) => {
             if let Some(id) = cursor_id {
-                set_category(app, id, Category::A);
+                return Action::SetCategory(id, Category::A);
             }
         }
         (KeyCode::Char('B'), KeyModifiers::SHIFT) => {
             if let Some(id) = cursor_id {
-                set_category(app, id, Category::B);
+                return Action::SetCategory(id, Category::B);
             }
         }
         (KeyCode::Char('C'), KeyModifiers::SHIFT) => {
             if let Some(id) = cursor_id {
-                set_category(app, id, Category::C);
+                return Action::SetCategory(id, Category::C);
             }
         }
-        // 1-9 reorders the cursor task to that 1-based position.
+        // 1-9 reorders the cursor task to that 1-based position within its category.
         (KeyCode::Char(c), KeyModifiers::NONE)
             if cursor_id.is_some() && c.is_ascii_digit() && c != '0' =>
         {
@@ -143,26 +151,6 @@ fn handle_search_input(app: &mut App, key: KeyEvent) -> Action {
         _ => {}
     }
     Action::Continue
-}
-
-fn toggle_change(app: &mut App, change: PendingChange) {
-    let id = match &change {
-        PendingChange::ToggleComplete(id) => *id,
-        PendingChange::ToggleDelete(id) => *id,
-        PendingChange::SetCategory(id, _) => *id,
-    };
-    let changes = app.pending.entry(id).or_default();
-    if let Some(pos) = changes.iter().position(|c| c == &change) {
-        changes.remove(pos);
-    } else {
-        changes.push(change);
-    }
-}
-
-fn set_category(app: &mut App, id: TaskId, p: Category) {
-    let changes = app.pending.entry(id).or_default();
-    changes.retain(|c| !matches!(c, PendingChange::SetCategory(_, _)));
-    changes.push(PendingChange::SetCategory(id, p));
 }
 
 #[cfg(test)]
@@ -244,19 +232,24 @@ mod tests {
     }
 
     #[test]
-    fn c_key_adds_toggle_complete_pending() {
+    fn c_returns_immediate_complete_action() {
         let mut app = make_app();
-        handle(&mut app, key(KeyCode::Char('c')));
-        let changes = app.pending.get(&1).unwrap();
-        assert!(changes.contains(&PendingChange::ToggleComplete(1)));
+        let action = handle(&mut app, key(KeyCode::Char('c')));
+        assert_eq!(action, Action::Complete(1));
     }
 
     #[test]
-    fn d_key_adds_toggle_delete_pending() {
+    fn d_returns_immediate_delete_action() {
         let mut app = make_app();
-        handle(&mut app, key(KeyCode::Char('d')));
-        let changes = app.pending.get(&1).unwrap();
-        assert!(changes.contains(&PendingChange::ToggleDelete(1)));
+        let action = handle(&mut app, key(KeyCode::Char('d')));
+        assert_eq!(action, Action::Delete(1));
+    }
+
+    #[test]
+    fn u_returns_undo_and_r_returns_redo() {
+        let mut app = make_app();
+        assert_eq!(handle(&mut app, key(KeyCode::Char('u'))), Action::Undo);
+        assert_eq!(handle(&mut app, key(KeyCode::Char('r'))), Action::Redo);
     }
 
     #[test]
@@ -295,21 +288,10 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_s_is_no_longer_recognized() {
+    fn shift_a_returns_set_category_a() {
         let mut app = make_app();
-        let action = handle(
-            &mut app,
-            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
-        );
-        assert_eq!(action, Action::Continue);
-    }
-
-    #[test]
-    fn shift_a_sets_category_a() {
-        let mut app = make_app();
-        handle(&mut app, shift_key(KeyCode::Char('A')));
-        let changes = app.pending.get(&1).unwrap();
-        assert!(changes.contains(&PendingChange::SetCategory(1, Category::A)));
+        let action = handle(&mut app, shift_key(KeyCode::Char('A')));
+        assert_eq!(action, Action::SetCategory(1, Category::A));
     }
 
     #[test]
@@ -420,11 +402,11 @@ mod tests {
     }
 
     #[test]
-    fn keys_other_than_text_input_are_inert_in_search_mode() {
+    fn text_input_in_search_mode_does_not_trigger_actions() {
         let mut app = make_app();
         handle(&mut app, key(KeyCode::Char('/')));
-        let action = handle(&mut app, key(KeyCode::Char('a')));
+        let action = handle(&mut app, key(KeyCode::Char('d')));
         assert_eq!(action, Action::Continue);
-        assert_eq!(app.search_input.as_deref(), Some("a"));
+        assert_eq!(app.search_input.as_deref(), Some("d"));
     }
 }

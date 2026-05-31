@@ -1,7 +1,7 @@
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use task::model::{Category, Status, Task};
-use task::tui::events::{handle, Action, PendingChange};
+use task::tui::events::{handle, Action};
 use task::tui::App;
 
 fn make_task(id: u32) -> Task {
@@ -38,35 +38,34 @@ fn navigate_down_and_up() {
 }
 
 #[test]
-fn toggle_complete_adds_and_removes() {
+fn c_signals_immediate_complete() {
     let mut app = make_app();
-    handle(&mut app, press(KeyCode::Char('c')));
-    assert!(app.pending[&1].contains(&PendingChange::ToggleComplete(1)));
-    handle(&mut app, press(KeyCode::Char('c')));
-    assert!(app.pending.get(&1).map(|v| v.is_empty()).unwrap_or(true));
+    let action = handle(&mut app, press(KeyCode::Char('c')));
+    assert_eq!(action, Action::Complete(1));
 }
 
 #[test]
-fn toggle_delete_adds_and_removes() {
+fn d_signals_immediate_delete() {
     let mut app = make_app();
-    handle(&mut app, press(KeyCode::Char('d')));
-    assert!(app.pending[&1].contains(&PendingChange::ToggleDelete(1)));
+    let action = handle(&mut app, press(KeyCode::Char('d')));
+    assert_eq!(action, Action::Delete(1));
 }
 
 #[test]
-fn set_category_replaces_existing() {
+fn shift_category_signals_set_category() {
     let mut app = make_app();
-    handle(
+    let action = handle(
         &mut app,
         KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT),
     );
-    handle(
-        &mut app,
-        KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT),
-    );
-    let changes = &app.pending[&1];
-    assert!(!changes.contains(&PendingChange::SetCategory(1, Category::A)));
-    assert!(changes.contains(&PendingChange::SetCategory(1, Category::C)));
+    assert_eq!(action, Action::SetCategory(1, Category::A));
+}
+
+#[test]
+fn u_and_r_signal_undo_redo() {
+    let mut app = make_app();
+    assert_eq!(handle(&mut app, press(KeyCode::Char('u'))), Action::Undo);
+    assert_eq!(handle(&mut app, press(KeyCode::Char('r'))), Action::Redo);
 }
 
 #[test]
@@ -88,6 +87,13 @@ fn digit_key_signals_reorder() {
     let mut app = make_app();
     let action = handle(&mut app, press(KeyCode::Char('2')));
     assert_eq!(action, Action::ReorderCursor(2));
+}
+
+#[test]
+fn a_signals_add() {
+    let mut app = make_app();
+    let action = handle(&mut app, press(KeyCode::Char('a')));
+    assert_eq!(action, Action::AddTask);
 }
 
 #[test]
