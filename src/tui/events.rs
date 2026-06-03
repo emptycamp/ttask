@@ -17,6 +17,8 @@ pub enum Action {
     SetCategory(TaskId, Category),
     Complete(TaskId),
     Delete(TaskId),
+    /// Open a link from the task's text (same flow as `task open <id>`).
+    OpenLink(TaskId),
     Undo,
     Redo,
 }
@@ -56,6 +58,11 @@ fn handle_normal(app: &mut App, key: KeyEvent) -> Action {
         (KeyCode::Char('e'), KeyModifiers::NONE) => {
             if let Some(id) = cursor_id {
                 return Action::EditTask(id);
+            }
+        }
+        (KeyCode::Char('o'), KeyModifiers::NONE) => {
+            if let Some(id) = cursor_id {
+                return Action::OpenLink(id);
             }
         }
         (KeyCode::Char('c'), KeyModifiers::NONE) => {
@@ -257,6 +264,22 @@ mod tests {
         let mut app = make_app();
         let action = handle(&mut app, key(KeyCode::Char('e')));
         assert_eq!(action, Action::EditTask(1));
+    }
+
+    #[test]
+    fn o_key_returns_open_link_action() {
+        let mut app = make_app();
+        let action = handle(&mut app, key(KeyCode::Char('o')));
+        assert_eq!(action, Action::OpenLink(1));
+    }
+
+    #[test]
+    fn o_in_search_mode_types_instead_of_opening() {
+        let mut app = make_app();
+        handle(&mut app, key(KeyCode::Char('/')));
+        let action = handle(&mut app, key(KeyCode::Char('o')));
+        assert_eq!(action, Action::Continue);
+        assert_eq!(app.search_input.as_deref(), Some("o"));
     }
 
     #[test]

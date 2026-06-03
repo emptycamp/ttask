@@ -52,10 +52,11 @@ fn canonicalize(parent: &[String], token: &str) -> Option<String> {
         [] => match token {
             "add" | "create" | "new" => Some("add".into()),
             "list" | "ls" => Some("list".into()),
-            "edit" | "update" | "modify" | "change" | "set" => Some("edit".into()),
+            "edit" | "e" | "update" | "modify" | "change" | "set" => Some("edit".into()),
             "delete" | "del" | "remove" | "rm" | "discard" | "trash" => Some("delete".into()),
             "complete" | "done" | "finish" | "finished" | "close" => Some("complete".into()),
             "info" | "show" | "view" | "details" => Some("info".into()),
+            "open" | "o" | "launch" => Some("open".into()),
             "clear" | "wipe" | "nuke" | "reset" => Some("clear".into()),
             "history" | "log" | "events" => Some("history".into()),
             _ => None,
@@ -78,6 +79,7 @@ pub fn render(path: &[String]) -> String {
         ["delete"] => DELETE.to_string(),
         ["complete"] => COMPLETE.to_string(),
         ["info"] => INFO.to_string(),
+        ["open"] => OPEN.to_string(),
         ["clear"] => CLEAR.to_string(),
         ["history"] => HISTORY.to_string(),
         ["history", "list"] => HISTORY_LIST.to_string(),
@@ -105,6 +107,8 @@ forever and will hang your script / tool call. Specifically:
 - `task history` with **no subcommand** — opens the history picker. Use
   `task history list` instead (and add `--format md` to get a table).
 - `task clear` without `-y` — opens a confirmation prompt. Pass `-y` to skip.
+- `task open <ID>` when the task has **several links** — opens a picker. Pass the
+  link number (`task open 3 2`) to avoid it.
 
 For machine-readable output, append `--format md` to any non-interactive
 subcommand (`task list --format md`, `task info 3 --format md`,
@@ -119,11 +123,12 @@ If no command is given, the interactive TUI opens.
 ## Commands
 
 - **add** `ARGS...` — Add a new task.
-- **list** — List tasks (active by default), grouped by category then manual order.
+- **list** `[ID]` — List tasks (active by default); with an ID, show that task's details.
 - **edit** `ID [ARGS]...` — Edit a task. With no args, opens the text editor.
 - **delete** `ID` — Soft-delete a task (recoverable via `history`).
 - **complete** `ID` — Mark a task as completed.
 - **info** `ID` — Show task details.
+- **open** `ID [N]` — Open a link from a task's text (picker if several; or pass N).
 - **clear** — Wipe the entire database (irreversible).
 - **history** — Show recent changes, or revert a specific event.
 
@@ -137,6 +142,7 @@ Run `task` with no command to open the interactive list. Then:
 - `/` — search/filter the task list; type to filter, `Enter` to apply, `Esc` to
   cancel the edit
 - `a` — add a task
+- `o` — open a link from the cursor task's text (picker if it has several)
 - `c` / `d` — complete / delete the cursor task (applied immediately)
 - `Shift+A` / `Shift+B` / `Shift+C` — set category on the cursor task (immediate)
 - `u` / `r` — undo / redo the last change made this session. Undo/redo history is
@@ -219,9 +225,12 @@ const LIST: &str = "\
 List tasks. By default shows only active tasks, grouped by category (A, then B,
 then C) and ordered within each category by its manual order.
 
+Given a task ID, shows that single task's full details instead — `task list 3` is a
+shortcut for `task info 3`.
+
 ## Usage
 
-`task list [OPTIONS]`
+`task list [ID] [OPTIONS]`
 
 ## Options
 
@@ -233,6 +242,7 @@ then C) and ordered within each category by its manual order.
 ## Examples
 
 - `task list` — active tasks, grouped by category
+- `task list 3` — full details for task #3 (like `task info 3`)
 - `task list --completed` — completed tasks
 - `task list --all` — everything
 
@@ -254,9 +264,11 @@ Edit an existing task.
 `task edit ID [ARGS]...`
 
 With no field args, opens the built-in text editor inside the terminal — an
-interactive TUI that blocks on input. It edits the task text only; a duration
-token at the start or end (e.g. `Buy milk 45m`) sets the estimate. Category and
-ord are not editable from the editor.
+interactive TUI that blocks on input. `Enter` inserts a newline (tasks may carry a
+multi-line description); `Esc` (or `Ctrl+C`) saves and exits — there is no discard
+key. `Ctrl+left` / `Ctrl+right` jump by word. For a single-line task a duration
+token at the start or end (e.g. `Buy milk 45m`) still sets the estimate. Category
+and ord are not editable from the editor.
 
 ## ⚠ Notice for LLM agents
 
@@ -329,6 +341,36 @@ Show full task details (text, category, ord, est, status, timestamps).
 - `task info 3`
 
 In markdown mode the output is a heading plus a bulleted list of fields.
+";
+
+const OPEN: &str = "\
+# task open
+
+Open a link contained in a task's text using the system's default handler
+(the default browser on Windows, `open` on macOS, `xdg-open` on Linux).
+
+## Usage
+
+`task open ID [INDEX]`
+
+The task text is scanned for URLs (`http://`, `https://`, or a leading `www.`):
+
+- no links — an error.
+- exactly one link — it is opened.
+- several links — opens an interactive picker, **unless** you pass the 1-based
+  `INDEX` of the link to open.
+
+## ⚠ Notice for LLM agents
+
+With several links and no `INDEX`, `task open` opens an interactive picker that
+blocks. **Always pass the link number** (`task open 3 2`). In a non-interactive
+context the command instead errors and lists the numbered links, so you can re-run
+with the right index. `task open <ID> 1` opens the first link non-interactively.
+
+## Examples
+
+- `task open 3` — open the only link in task #3 (or pick one if there are several)
+- `task open 3 2` — open the 2nd link in task #3 (no picker)
 ";
 
 const CLEAR: &str = "\
@@ -514,5 +556,19 @@ mod tests {
         let out = render(&["mystery".into()]);
         assert!(out.contains("No markdown help"));
         assert!(out.contains("task mystery --help"));
+    }
+
+    #[test]
+    fn render_open_describes_links_and_picker() {
+        let out = render(&["open".into()]);
+        assert!(out.starts_with("# task open"));
+        assert!(out.contains("picker"));
+        assert!(out.contains("link number"));
+    }
+
+    #[test]
+    fn extract_canonicalizes_open_short_alias() {
+        let path = extract_subcommand_path(&args(&["o", "--help", "--format", "md"]));
+        assert_eq!(path, vec!["open".to_string()]);
     }
 }

@@ -45,6 +45,18 @@ fn edit_alias_update_works() {
 }
 
 #[test]
+fn edit_alias_e_works() {
+    let scope = StoreScope::new();
+    task(&scope).args(["add", "Task"]).assert().success();
+    task(&scope).args(["e", "1", "New text"]).assert().success();
+    task(&scope)
+        .args(["info", "1"])
+        .assert()
+        .success()
+        .stdout(contains("New text"));
+}
+
+#[test]
 fn create_alias_works() {
     let scope = StoreScope::new();
     task(&scope)

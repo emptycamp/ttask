@@ -64,6 +64,17 @@ fn help_with_format_md_for_history_list_subcommand_routes_correctly() {
 }
 
 #[test]
+fn help_with_format_md_for_open_subcommand_routes_correctly() {
+    let scope = StoreScope::new();
+    task(&scope)
+        .args(["open", "--help", "--format", "md"])
+        .assert()
+        .success()
+        .stdout(contains("# task open"))
+        .stdout(contains("picker"));
+}
+
+#[test]
 fn help_with_format_md_for_alias_normalizes_to_canonical_command() {
     // `ls` is the alias of `list`; markdown help should render the `list` page.
     let scope = StoreScope::new();

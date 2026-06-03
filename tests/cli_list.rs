@@ -267,3 +267,73 @@ fn list_format_md_empty_uses_no_tasks_italic() {
         .success()
         .stdout(contains("_No tasks._"));
 }
+
+#[test]
+fn list_with_id_shows_task_details() {
+    // `task ls <id>` is a shortcut for `task show <id>` / `task info <id>`.
+    let scope = StoreScope::new();
+    task(&scope)
+        .args(["add", "Buy milk", "c:a"])
+        .assert()
+        .success();
+    task(&scope)
+        .args(["ls", "1"])
+        .assert()
+        .success()
+        .stdout(contains("Task #1"))
+        .stdout(contains("Buy milk"))
+        .stdout(contains("Category"));
+}
+
+#[test]
+fn list_with_id_format_md_shows_task_card() {
+    let scope = StoreScope::new();
+    task(&scope).args(["add", "Read book"]).assert().success();
+    task(&scope)
+        .args(["--format", "md", "list", "1"])
+        .assert()
+        .success()
+        .stdout(contains("# Task #1"))
+        .stdout(contains("- **Text:** Read book"));
+}
+
+#[test]
+fn list_shows_first_line_only_but_show_keeps_full_text() {
+    let scope = StoreScope::new();
+    task(&scope).args(["add", "placeholder"]).assert().success();
+    // Give the task a genuine multi-line description via the YAML edit hook (the
+    // double-quoted scalar turns the literal `\n` into a real newline).
+    let yaml = "text: \"line one\\nline two\"\ncategory: B\nord: 1\nest: 30m\n";
+    task(&scope)
+        .args(["edit", "1"])
+        .env("TASK_EDIT_YAML", yaml)
+        .assert()
+        .success();
+
+    // `task ls` shows only the first line with an ellipsis — multi-line text is not
+    // flattened into one run-on row.
+    task(&scope)
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(contains("line one…"))
+        .stdout(predicates::str::contains("line two").not());
+
+    // `task show` keeps the line break in the details view.
+    let out = task(&scope).args(["show", "1"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("line one"),
+        "show missing first line:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("line two"),
+        "show missing second line:\n{stdout}"
+    );
+    let one = stdout.find("line one").unwrap();
+    let two = stdout.find("line two").unwrap();
+    assert!(
+        stdout[one..two].contains('\n'),
+        "details view should keep the newline between the lines:\n{stdout}"
+    );
+}

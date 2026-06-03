@@ -42,6 +42,11 @@ const EST_W: usize = 4;
 
 const DIVIDER_WIDTH: usize = 4 + ID_W + 2 + CAT_W + 2 + TEXT_W + 2 + ORD_W + 2 + EST_W;
 
+/// Column where a field's value starts in `format_info` (the width of the
+/// `"  Text:     "` style labels). Continuation lines of a multi-line description are
+/// indented to here so they sit under the value.
+const INFO_LABEL_W: usize = 12;
+
 pub fn format_list(tasks: &[Task], opts: &RenderOptions) -> String {
     if opts.markdown {
         return format_list_md(tasks);
@@ -67,7 +72,7 @@ pub fn format_list(tasks: &[Task], opts: &RenderOptions) -> String {
 /// leading `✓` / `✗` badge; active rows have none.
 pub fn format_list_row(task: &Task, opts: &RenderOptions) -> String {
     let est_str = format_est(task.est_secs);
-    let text = truncate(&sanitize_for_terminal(&task.text), TEXT_W);
+    let text = one_line(&task.text, TEXT_W);
 
     let cat_letter = task.category.to_string();
     let cat_styled = if opts.color {
@@ -158,10 +163,42 @@ pub fn sanitize_for_terminal(s: &str) -> String {
     out
 }
 
+/// A one-line preview of a task's text for compact rows (`task ls`, the TUI list):
+/// the first line only, sanitized, with a trailing `…` whenever something is hidden
+/// — either more lines below or a first line too long for `width`. Multi-line text is
+/// never flattened into one run-on line here.
+pub fn one_line(text: &str, width: usize) -> String {
+    let first = text.split('\n').next().unwrap_or("");
+    // Anything non-blank past the first line means there's hidden content to flag.
+    let has_more = text[first.len()..].chars().any(|c| !c.is_whitespace());
+    let sanitized = sanitize_for_terminal(first);
+    if !has_more {
+        return truncate(&sanitized, width);
+    }
+    let chars: Vec<char> = sanitized.chars().collect();
+    let keep = width.saturating_sub(1); // leave a column for the ellipsis
+    if chars.len() > keep {
+        format!("{}…", chars[..keep].iter().collect::<String>())
+    } else {
+        format!("{sanitized}…")
+    }
+}
+
 /// Canonical task ordering: by category (A, then B, then C), then by the
 /// per-category manual ord ascending, then by id as a tiebreaker.
 pub fn sort_key(t: &Task) -> (Category, u32, u32) {
     (t.category, t.ord, t.id)
+}
+
+/// Sanitize each line of `text` for the terminal and rejoin them, indenting every
+/// line after the first by `indent` spaces so a multi-line value lines up under its
+/// label. Single-line text is returned unchanged (one sanitized line, no indent).
+fn indent_continuations(text: &str, indent: usize) -> String {
+    let pad = " ".repeat(indent);
+    text.split('\n')
+        .map(sanitize_for_terminal)
+        .collect::<Vec<_>>()
+        .join(&format!("\n{pad}"))
 }
 
 pub fn format_info(task: &Task, opts: &RenderOptions) -> String {
@@ -186,10 +223,14 @@ pub fn format_info(task: &Task, opts: &RenderOptions) -> String {
         task.category.to_string()
     };
 
+    // The details view keeps a multi-line description's line breaks (this is where
+    // you read the whole thing); the compact `task ls` view collapses them. Each line
+    // is still sanitized, and continuation lines are indented under the value.
+    let text_block = indent_continuations(&task.text, INFO_LABEL_W);
     let mut out = format!(
         "Task #{}\n  Text:     {}\n  Category: {}\n  Status:   {}\n  Ord:      {}\n  Est:      {}\n  Created:  {}\n",
         task.id,
-        sanitize_for_terminal(&task.text),
+        text_block,
         category_str,
         status,
         task.ord,
@@ -616,6 +657,46 @@ mod tests {
         let row = format_list_row(&task, &opts);
         assert!(!row.contains('\x1b'));
         assert!(!row.contains('\t'));
+    }
+
+    #[test]
+    fn one_line_keeps_single_line_as_is() {
+        assert_eq!(one_line("Buy milk", 42), "Buy milk");
+    }
+
+    #[test]
+    fn one_line_truncates_multiline_to_first_line_with_ellipsis() {
+        assert_eq!(one_line("first line\nsecond line", 42), "first line…");
+    }
+
+    #[test]
+    fn one_line_ignores_trailing_blank_lines() {
+        assert_eq!(one_line("solo\n\n  \n", 42), "solo");
+    }
+
+    #[test]
+    fn one_line_truncates_long_single_line() {
+        let s = "x".repeat(50);
+        assert_eq!(one_line(&s, 42), format!("{}…", "x".repeat(41)));
+    }
+
+    #[test]
+    fn one_line_multiline_with_long_first_line_uses_single_ellipsis() {
+        let s = format!("{}\nmore", "y".repeat(50));
+        assert_eq!(one_line(&s, 42), format!("{}…", "y".repeat(41)));
+    }
+
+    #[test]
+    fn format_list_row_multiline_shows_only_first_line() {
+        let opts = RenderOptions::no_color();
+        let mut t = make_task(1, "do this", Category::B, 1);
+        t.text = "do this\nthen that\nfinally".to_string();
+        let row = format_list_row(&t, &opts);
+        assert!(row.contains("do this…"), "got: {row}");
+        assert!(
+            !row.contains("then that"),
+            "later lines must not appear in the compact row: {row}"
+        );
     }
 
     #[test]

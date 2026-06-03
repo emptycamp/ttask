@@ -1,4 +1,4 @@
-use crate::format::{estimate_summary, format_est};
+use crate::format::{estimate_summary, format_est, one_line};
 use crate::model::{Category, Task};
 use crate::tui::App;
 use chrono::Local;
@@ -121,7 +121,7 @@ fn make_help_or_search(app: &App) -> Paragraph<'static> {
         ]));
     }
     Paragraph::new(Span::styled(
-        " ↑↓ · 1-9 reorder · ⏎/e edit · a add · c done · d del · A/B/C cat · u/r undo · / search · Esc quit ",
+        " ↑↓ · 1-9 reorder · ⏎/e edit · a add · o open · c done · d del · A/B/C cat · u/r undo · / search · Esc quit ",
         Style::default().fg(Color::DarkGray),
     ))
 }
@@ -142,7 +142,7 @@ fn make_item(task: &Task, width: usize, selected: bool) -> ListItem<'static> {
     let left = format!("   {:>w_id$}  {cat_pad}", task.id, w_id = ID_W);
     let middle = format!(
         "  {:<w_text$}  {:>w_est$}",
-        truncate(&task.text, TEXT_W),
+        one_line(&task.text, TEXT_W),
         est_str,
         w_text = TEXT_W,
         w_est = EST_W,
@@ -178,16 +178,4 @@ fn make_item(task: &Task, width: usize, selected: bool) -> ListItem<'static> {
     .style(line_style);
 
     ListItem::new(line)
-}
-
-fn truncate(s: &str, width: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= width {
-        s.to_string()
-    } else {
-        format!(
-            "{}…",
-            &chars[..width.saturating_sub(1)].iter().collect::<String>()
-        )
-    }
 }

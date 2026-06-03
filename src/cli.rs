@@ -57,8 +57,12 @@ Editing the task (text, category, ord, est) resets the clock.
 List tasks. By default shows only active tasks, grouped by category (A, then B,
 then C) and ordered within each category by its manual order.
 
+Given a task ID, shows that single task's full details instead — `task list 3` is a
+shortcut for `task info 3`.
+
 Examples:
   task list                       # active tasks (default)
+  task list 3                     # full details for task #3 (like `task info 3`)
   task list --active              # active tasks (explicit)
   task list -a                    # short for --active
   task list --completed           # only completed
@@ -66,6 +70,9 @@ Examples:
   task list --all                 # everything (active + completed + deleted)
 ")]
     List {
+        /// Show this task's full details instead of the list (a shortcut for
+        /// `task info <id>`). When omitted, the normal list is shown.
+        id: Option<TaskId>,
         /// Show only active tasks (default).
         #[arg(short = 'a', long, aliases = ["activeonly", "open", "pending", "todo"])]
         active: bool,
@@ -80,16 +87,18 @@ Examples:
         all: bool,
     },
     /// Edit an existing task. With no field args, opens the built-in form editor.
-    #[command(aliases = ["update", "modify", "change", "set"])]
+    #[command(aliases = ["e", "update", "modify", "change", "set"])]
     #[command(long_about = "\
 Edit an existing task.
 
-With no field args, opens the built-in text editor inside the terminal: a single
-input pre-filled with the task text. You edit the text, and a duration token at
-the start or end (e.g. `Buy milk 45m`) sets the estimate. Enter saves, Esc
-discards. Category and ord are changed from the main `task` view or via args, not
-in the editor. The editor requires a real TTY; in scripts or piped contexts, pass
-field args (c:/ord:/est:/text) directly.
+With no field args, opens the built-in text editor inside the terminal: a small
+text area pre-filled with the task text. Enter inserts a newline (tasks may carry a
+multi-line description); Esc — or Ctrl+C — saves and exits. There is no discard
+key. Ctrl+left / Ctrl+right jump by word. For a single-line task a duration token
+at the start or end (e.g. `Buy milk 45m`) still sets the estimate. Category and ord
+are changed from the main `task` view or via args, not in the editor. The editor
+requires a real TTY; in scripts or piped contexts, pass field args
+(c:/ord:/est:/text) directly.
 
 Examples:
   task edit 3                       # open the text editor in this terminal
@@ -132,6 +141,29 @@ Examples:
   task info 3
 ")]
     Info { id: TaskId },
+    /// Open a link found in a task's text.
+    #[command(aliases = ["o", "launch"])]
+    #[command(long_about = "\
+Open a link contained in a task's text using the system's default handler
+(the default browser on Windows, `open` on macOS, `xdg-open` on Linux).
+
+`task open <ID>` scans the task text for URLs (http://, https://, or a leading
+`www.`):
+  no links           an error
+  exactly one link   it is opened
+  several links      a picker lets you choose one — or pass the link number
+                     directly to skip it: `task open <ID> 2`
+
+Examples:
+  task open 3                     # open the only link in task #3 (or pick one)
+  task open 3 2                   # open the 2nd link in task #3 (no picker)
+")]
+    Open {
+        /// Task to open a link from.
+        id: TaskId,
+        /// Which link to open (1-based) when the task has several — skips the picker.
+        index: Option<usize>,
+    },
     /// Wipe the entire database — every task and every history event.
     #[command(aliases = ["wipe", "nuke", "reset"])]
     #[command(long_about = "\

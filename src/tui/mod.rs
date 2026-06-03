@@ -224,6 +224,21 @@ fn run_loop(
                 })?;
                 refresh_tasks(app, store)?;
             }
+            Action::OpenLink(id) => {
+                app.status = None;
+                // Opening a link doesn't touch the store, so it's not an undoable
+                // mutation. Pause the TUI so the (possible) link picker owns the
+                // screen, then report the outcome in the footer.
+                let store_ref: &Store = store;
+                let outcome = with_paused_terminal(terminal, || {
+                    crate::commands::open::run(id, None, store_ref, &crate::commands::SystemTty)
+                });
+                app.status = Some(match outcome {
+                    Ok(Some(url)) => format!("opened {url}"),
+                    Ok(None) => "open cancelled".to_string(),
+                    Err(e) => format!("{e}"),
+                });
+            }
             Action::Undo => {
                 undo(store, &mut stacks, app)?;
             }

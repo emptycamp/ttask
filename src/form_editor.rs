@@ -1,12 +1,15 @@
-//! Built-in single-field text editor for tasks.
+//! Built-in multi-line text editor for tasks.
 //!
-//! One text input, pre-filled with the task's text and wrapped across lines when
-//! long. The user only ever edits the text. To change the estimate they type a
-//! duration token at the start or end of the text (e.g. `Buy milk 45m`, `4.5h plan
-//! sprint`) — exactly the shorthand `task add` accepts. On Enter the token is
-//! pulled out and applied to the estimate without polluting the text; Esc discards
-//! everything. Category and ord are not editable here — those are changed from the
-//! main `task` view.
+//! A small text area, pre-filled with the task's text. `Enter` inserts a newline so
+//! a task can carry a multi-line description; `Esc` (or `Ctrl+C`) finishes and saves
+//! — there is intentionally no discard key. `Ctrl+←`/`Ctrl+→` jump by word.
+//!
+//! For a single-line task the duration shorthand still applies: a duration token at
+//! the start or end of the text (e.g. `Buy milk 45m`, `4.5h plan sprint`) is pulled
+//! out into the estimate on save. A multi-line description is stored verbatim, so its
+//! newlines survive (they collapse to spaces only in the compact `task ls` view).
+//! Category and ord are not editable here — those are changed from the main `task`
+//! view.
 
 use crate::editor::Saver;
 use crate::error::{Error, Result};
@@ -30,10 +33,9 @@ use std::io;
 pub struct State {
     pub task_id: u32,
     pub input: String,
-    /// Cursor position as a char index into `input`.
+    /// Cursor position as a char index into `input`. Newlines count as one char.
     pub cursor: usize,
     pub baseline_est_secs: i64,
-    pub error: Option<String>,
 }
 
 impl State {
@@ -43,29 +45,44 @@ impl State {
             input: task.text.clone(),
             cursor: task.text.chars().count(),
             baseline_est_secs: task.est_secs,
-            error: None,
         }
     }
 
-    /// The estimate the current input would apply: a detected token, otherwise the
-    /// unchanged baseline.
+    /// The estimate the current input would apply. The trailing/leading duration
+    /// shorthand only applies to single-line input; a multi-line description is
+    /// stored verbatim, so the estimate stays at the unchanged baseline.
     fn effective_est_secs(&self) -> i64 {
-        match split_estimate(&self.input) {
-            (_, Some(secs)) => secs,
-            (_, None) => self.baseline_est_secs,
+        match self.detected_est() {
+            Some(secs) => secs,
+            None => self.baseline_est_secs,
         }
     }
 
-    /// Build the proposed task from `baseline`, applying the typed text and any
-    /// duration token found in it. Errors if the text would be empty.
+    /// The estimate detected from a single-line duration token, if any.
+    fn detected_est(&self) -> Option<i64> {
+        if self.input.contains('\n') {
+            return None;
+        }
+        split_estimate(&self.input).1
+    }
+
+    /// Build the proposed task from `baseline`, applying the typed text. A duration
+    /// token is pulled into the estimate only for single-line input; multi-line text
+    /// keeps its newlines. Errors if the text would be empty.
     pub fn commit(&self, baseline: &Task) -> std::result::Result<Task, String> {
-        let (text, est) = split_estimate(&self.input);
-        let text = text.trim();
-        if text.is_empty() {
+        let trimmed = self.input.trim();
+        if trimmed.is_empty() {
             return Err("text cannot be empty".into());
         }
+        // Multi-line text is stored verbatim (newlines preserved); only single-line
+        // input feeds the `45m`-style estimate shorthand.
+        let (text, est) = if trimmed.contains('\n') {
+            (trimmed.to_string(), None)
+        } else {
+            split_estimate(trimmed)
+        };
         let mut updated = baseline.clone();
-        updated.text = text.to_string();
+        updated.text = text;
         if let Some(secs) = est {
             updated.est_secs = secs;
         }
@@ -75,38 +92,47 @@ impl State {
 
 pub enum Action {
     Continue,
-    Confirm,
-    Cancel,
+    /// Leave the editor. The run-loop saves the committed task if it's non-empty; an
+    /// empty buffer simply exits without saving (there is nothing to discard).
+    Exit,
 }
 
 pub fn handle_key(state: &mut State, key: KeyEvent) -> Action {
-    match (key.code, key.modifiers) {
-        (KeyCode::Esc, _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => return Action::Cancel,
-        (KeyCode::Enter, _) => return Action::Confirm,
-        (KeyCode::Char(c), m) if !m.contains(KeyModifiers::CONTROL) => {
-            insert_char(&mut state.input, &mut state.cursor, c);
-            state.error = None;
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    match key.code {
+        // Esc / Ctrl+C save and leave — there is intentionally no discard key.
+        KeyCode::Esc => return Action::Exit,
+        KeyCode::Char('c') if ctrl => return Action::Exit,
+        // Enter inserts a newline; Esc is how you finish.
+        KeyCode::Enter => insert_char(&mut state.input, &mut state.cursor, '\n'),
+        KeyCode::Char(c) if !ctrl => insert_char(&mut state.input, &mut state.cursor, c),
+        KeyCode::Backspace => delete_before(&mut state.input, &mut state.cursor),
+        KeyCode::Delete => delete_at(&mut state.input, &mut state.cursor),
+        // Ctrl+←/→ (also Alt, which some terminals send) jump by word.
+        KeyCode::Left if ctrl || alt => {
+            state.cursor = prev_word(&char_vec(&state.input), state.cursor)
         }
-        (KeyCode::Backspace, _) => {
-            delete_before(&mut state.input, &mut state.cursor);
-            state.error = None;
+        KeyCode::Right if ctrl || alt => {
+            state.cursor = next_word(&char_vec(&state.input), state.cursor)
         }
-        (KeyCode::Delete, _) => {
-            delete_at(&mut state.input, &mut state.cursor);
-            state.error = None;
-        }
-        (KeyCode::Left, _) => state.cursor = state.cursor.saturating_sub(1),
-        (KeyCode::Right, _) => {
-            let len = state.input.chars().count();
-            if state.cursor < len {
+        KeyCode::Left => state.cursor = state.cursor.saturating_sub(1),
+        KeyCode::Right => {
+            if state.cursor < state.input.chars().count() {
                 state.cursor += 1;
             }
         }
-        (KeyCode::Home, _) => state.cursor = 0,
-        (KeyCode::End, _) => state.cursor = state.input.chars().count(),
+        KeyCode::Up => move_vertical(state, true),
+        KeyCode::Down => move_vertical(state, false),
+        KeyCode::Home => state.cursor = line_home(&char_vec(&state.input), state.cursor),
+        KeyCode::End => state.cursor = line_end(&char_vec(&state.input), state.cursor),
         _ => {}
     }
     Action::Continue
+}
+
+fn char_vec(s: &str) -> Vec<char> {
+    s.chars().collect()
 }
 
 fn insert_char(text: &mut String, cursor: &mut usize, c: char) {
@@ -140,20 +166,145 @@ fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
         .unwrap_or(s.len())
 }
 
-/// Hard-wrap `chars` into lines of at most `width` chars. Character wrapping (not
-/// word wrapping) keeps cursor math trivial: char index `i` is always at row
-/// `i / width`, column `i % width`.
-fn wrap_chars(chars: &[char], width: usize) -> Vec<String> {
-    if width == 0 {
-        return vec![chars.iter().collect()];
+/// Char index of the start of the previous word, skipping any whitespace
+/// immediately to the left first. Newlines count as whitespace, so word jumps cross
+/// line breaks.
+fn prev_word(chars: &[char], cursor: usize) -> usize {
+    let mut i = cursor.min(chars.len());
+    while i > 0 && chars[i - 1].is_whitespace() {
+        i -= 1;
     }
-    if chars.is_empty() {
-        return vec![String::new()];
+    while i > 0 && !chars[i - 1].is_whitespace() {
+        i -= 1;
     }
-    chars
-        .chunks(width)
-        .map(|chunk| chunk.iter().collect())
-        .collect()
+    i
+}
+
+/// Char index of the start of the next word: skip the current run of non-whitespace,
+/// then the whitespace that follows.
+fn next_word(chars: &[char], cursor: usize) -> usize {
+    let n = chars.len();
+    let mut i = cursor.min(n);
+    while i < n && !chars[i].is_whitespace() {
+        i += 1;
+    }
+    while i < n && chars[i].is_whitespace() {
+        i += 1;
+    }
+    i
+}
+
+/// Char index of the start of the logical line containing `cursor` (just after the
+/// previous newline, or 0).
+fn line_home(chars: &[char], cursor: usize) -> usize {
+    let mut i = cursor.min(chars.len());
+    while i > 0 && chars[i - 1] != '\n' {
+        i -= 1;
+    }
+    i
+}
+
+/// Char index of the end of the logical line containing `cursor` (just before the
+/// next newline, or the end of the text).
+fn line_end(chars: &[char], cursor: usize) -> usize {
+    let n = chars.len();
+    let mut i = cursor.min(n);
+    while i < n && chars[i] != '\n' {
+        i += 1;
+    }
+    i
+}
+
+/// Move the cursor up (`up == true`) or down one logical line, keeping the column.
+/// Display soft-wrapping is handled separately at render time; navigation works on
+/// the newline-delimited logical lines, which keeps it independent of the terminal
+/// width.
+fn move_vertical(state: &mut State, up: bool) {
+    let chars = char_vec(&state.input);
+    let home = line_home(&chars, state.cursor);
+    let col = state.cursor - home;
+    if up {
+        if home == 0 {
+            return; // already on the first line
+        }
+        let prev_end = home - 1; // the newline ending the previous line
+        let prev_home = line_home(&chars, prev_end);
+        let prev_len = prev_end - prev_home;
+        state.cursor = prev_home + col.min(prev_len);
+    } else {
+        let end = line_end(&chars, state.cursor);
+        if end >= chars.len() {
+            return; // already on the last line
+        }
+        let next_home = end + 1;
+        let next_len = line_end(&chars, next_home) - next_home;
+        state.cursor = next_home + col.min(next_len);
+    }
+}
+
+/// A single visual row after soft-wrapping: the char range `[start, start + len)`.
+struct VRow {
+    start: usize,
+    len: usize,
+}
+
+/// Lay out `chars` into visual rows for `width`, breaking on newlines and
+/// soft-wrapping long logical lines. An empty logical line (and a trailing newline)
+/// yields a zero-length row so the cursor can rest there.
+fn visual_rows(chars: &[char], width: usize) -> Vec<VRow> {
+    let width = width.max(1);
+    let n = chars.len();
+    let mut rows = Vec::new();
+    let mut seg_start = 0;
+    loop {
+        let mut seg_end = seg_start;
+        while seg_end < n && chars[seg_end] != '\n' {
+            seg_end += 1;
+        }
+        let mut p = seg_start;
+        loop {
+            let end = (p + width).min(seg_end);
+            rows.push(VRow {
+                start: p,
+                len: end - p,
+            });
+            p = end;
+            if p >= seg_end {
+                break;
+            }
+        }
+        if seg_end >= n {
+            break; // no trailing newline
+        }
+        seg_start = seg_end + 1;
+        if seg_start == n {
+            rows.push(VRow { start: n, len: 0 }); // trailing newline -> empty last row
+            break;
+        }
+    }
+    rows
+}
+
+/// Map a cursor char index to its `(row, col)` in the visual layout. At a soft-wrap
+/// boundary the cursor belongs at the start of the next row, not the end of the one
+/// that filled up.
+fn cursor_rc(rows: &[VRow], cursor: usize) -> (usize, usize) {
+    for (r, row) in rows.iter().enumerate() {
+        let end = row.start + row.len;
+        if cursor < end {
+            return (r, cursor - row.start);
+        }
+        if cursor == end {
+            if let Some(next) = rows.get(r + 1) {
+                if next.start == end {
+                    continue; // soft-wrap: fall through to the next row's column 0
+                }
+            }
+            return (r, cursor - row.start);
+        }
+    }
+    let last = rows.len().saturating_sub(1);
+    (last, rows.get(last).map(|r| r.len).unwrap_or(0))
 }
 
 fn draw(frame: &mut Frame, state: &State) {
@@ -178,40 +329,47 @@ fn draw(frame: &mut Frame, state: &State) {
 
     let text_area = chunks[0];
     let width = text_area.width.max(1) as usize;
+    let height = text_area.height.max(1) as usize;
     let chars: Vec<char> = state.input.chars().collect();
-    let lines: Vec<Line> = wrap_chars(&chars, width)
-        .into_iter()
-        .map(|l| Line::from(Span::styled(l, Style::default().fg(Color::White))))
+    let rows = visual_rows(&chars, width);
+    let (cur_row, cur_col) = cursor_rc(&rows, state.cursor);
+
+    // Scroll so the cursor row stays visible, pinned to the bottom once it overflows.
+    let scroll = cur_row.saturating_sub(height.saturating_sub(1));
+    let lines: Vec<Line> = rows
+        .iter()
+        .skip(scroll)
+        .take(height)
+        .map(|r| {
+            let s: String = chars[r.start..r.start + r.len].iter().collect();
+            Line::from(Span::styled(s, Style::default().fg(Color::White)))
+        })
         .collect();
     frame.render_widget(Paragraph::new(lines), text_area);
 
-    // Cursor row/col follow directly from the char index because we hard-wrap.
-    let cur_row = (state.cursor / width) as u16;
-    let cur_col = (state.cursor % width) as u16;
-    if cur_row < text_area.height {
-        frame.set_cursor_position((text_area.x + cur_col, text_area.y + cur_row));
+    let screen_row = (cur_row - scroll) as u16;
+    if screen_row < text_area.height {
+        frame.set_cursor_position((text_area.x + cur_col as u16, text_area.y + screen_row));
     }
 
-    let hint: Line = if let Some(err) = &state.error {
-        Line::from(Span::styled(
-            format!(" ! {err}"),
-            Style::default().fg(Color::Red),
-        ))
+    let detected = state.detected_est();
+    let est = format_est(state.effective_est_secs());
+    let label = if detected.is_some() {
+        format!(" estimate → {est}")
     } else {
-        let (_, detected) = split_estimate(&state.input);
-        let est = format_est(state.effective_est_secs());
-        let label = if detected.is_some() {
-            format!(" estimate → {est}")
-        } else {
-            format!(" estimate: {est}")
-        };
-        Line::from(Span::styled(label, Style::default().fg(Color::Cyan)))
+        format!(" estimate: {est}")
     };
-    frame.render_widget(Paragraph::new(hint), chunks[1]);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            label,
+            Style::default().fg(Color::Cyan),
+        ))),
+        chunks[1],
+    );
 
     frame.render_widget(
         Paragraph::new(Span::styled(
-            " Enter save · Esc cancel · append a duration (e.g. 45m) to set the estimate ",
+            " Esc save · Enter newline · Ctrl+←/→ word · a trailing duration (e.g. 45m) sets the estimate ",
             Style::default().fg(Color::DarkGray),
         )),
         chunks[2],
@@ -259,13 +417,14 @@ fn run_loop(
 
         match handle_key(&mut state, key) {
             Action::Continue => {}
-            Action::Cancel => return Ok(()),
-            Action::Confirm => match state.commit(&baseline) {
+            Action::Exit => match state.commit(&baseline) {
                 Ok(updated) => {
                     save(updated)?;
                     return Ok(());
                 }
-                Err(msg) => state.error = Some(msg),
+                // Empty buffer: nothing valid to save, so just leave the task as it
+                // was (a brand-new task is simply not created).
+                Err(_) => return Ok(()),
             },
         }
     }
@@ -297,6 +456,10 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
+    fn ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
     #[test]
     fn from_task_prefills_text_and_cursor_at_end() {
         let state = State::from_task(&make_task());
@@ -319,21 +482,92 @@ mod tests {
     }
 
     #[test]
-    fn esc_cancels() {
+    fn esc_exits() {
         let mut state = State::from_task(&make_task());
         assert!(matches!(
             handle_key(&mut state, key(KeyCode::Esc)),
-            Action::Cancel
+            Action::Exit
         ));
     }
 
     #[test]
-    fn enter_confirms() {
+    fn ctrl_c_exits() {
         let mut state = State::from_task(&make_task());
         assert!(matches!(
-            handle_key(&mut state, key(KeyCode::Enter)),
-            Action::Confirm
+            handle_key(&mut state, ctrl(KeyCode::Char('c'))),
+            Action::Exit
         ));
+    }
+
+    #[test]
+    fn enter_inserts_a_newline() {
+        let mut state = State::from_task(&make_task());
+        let action = handle_key(&mut state, key(KeyCode::Enter));
+        assert!(matches!(action, Action::Continue));
+        assert_eq!(state.input, "Buy milk\n");
+        assert_eq!(state.cursor, "Buy milk\n".chars().count());
+    }
+
+    #[test]
+    fn ctrl_left_jumps_to_previous_word_start() {
+        let mut state = State::from_task(&make_task()); // "Buy milk", cursor at 8
+        handle_key(&mut state, ctrl(KeyCode::Left));
+        assert_eq!(state.cursor, 4); // start of "milk"
+        handle_key(&mut state, ctrl(KeyCode::Left));
+        assert_eq!(state.cursor, 0); // start of "Buy"
+    }
+
+    #[test]
+    fn ctrl_right_jumps_to_next_word_start() {
+        let mut state = State::from_task(&make_task());
+        state.cursor = 0;
+        handle_key(&mut state, ctrl(KeyCode::Right));
+        assert_eq!(state.cursor, 4); // past "Buy " to start of "milk"
+        handle_key(&mut state, ctrl(KeyCode::Right));
+        assert_eq!(state.cursor, 8); // end of text
+    }
+
+    #[test]
+    fn ctrl_word_jump_crosses_newlines() {
+        let mut task = make_task();
+        task.text = "one\ntwo".to_string();
+        let mut state = State::from_task(&task); // cursor at 7 (end)
+        handle_key(&mut state, ctrl(KeyCode::Left));
+        assert_eq!(state.cursor, 4); // start of "two" (after the newline)
+        handle_key(&mut state, ctrl(KeyCode::Left));
+        assert_eq!(state.cursor, 0); // start of "one"
+    }
+
+    #[test]
+    fn up_moves_to_previous_logical_line_preserving_column() {
+        let mut task = make_task();
+        task.text = "abcd\nxy".to_string();
+        let mut state = State::from_task(&task);
+        state.cursor = 7; // col 2 on line 2
+        handle_key(&mut state, key(KeyCode::Up));
+        assert_eq!(state.cursor, 2); // col 2 on line 1 ("ab|cd")
+    }
+
+    #[test]
+    fn down_moves_to_next_logical_line_clamping_column() {
+        let mut task = make_task();
+        task.text = "abcd\nxy".to_string();
+        let mut state = State::from_task(&task);
+        state.cursor = 4; // end of line 1 (col 4)
+        handle_key(&mut state, key(KeyCode::Down));
+        assert_eq!(state.cursor, 7); // clamped to end of "xy"
+    }
+
+    #[test]
+    fn home_and_end_move_within_logical_line() {
+        let mut task = make_task();
+        task.text = "abc\ndefg".to_string();
+        let mut state = State::from_task(&task);
+        state.cursor = 6; // middle of "defg"
+        handle_key(&mut state, key(KeyCode::Home));
+        assert_eq!(state.cursor, 4); // start of line 2
+        handle_key(&mut state, key(KeyCode::End));
+        assert_eq!(state.cursor, 8); // end of line 2
     }
 
     #[test]
@@ -371,6 +605,21 @@ mod tests {
     }
 
     #[test]
+    fn commit_preserves_newlines_and_skips_estimate_shorthand() {
+        let task = make_task();
+        let mut state = State::from_task(&task);
+        handle_key(&mut state, key(KeyCode::Enter));
+        for c in "extra 30m".chars() {
+            handle_key(&mut state, key(KeyCode::Char(c)));
+        }
+        let updated = state.commit(&task).unwrap();
+        // Newlines survive, and the trailing `30m` is NOT treated as an estimate
+        // because the text is multi-line.
+        assert_eq!(updated.text, "Buy milk\nextra 30m");
+        assert_eq!(updated.est_secs, 1800);
+    }
+
+    #[test]
     fn commit_rejects_empty_text() {
         let mut task = make_task();
         task.text = String::new();
@@ -391,8 +640,22 @@ mod tests {
     }
 
     #[test]
-    fn wrap_chars_splits_on_width() {
-        let chars: Vec<char> = "abcdef".chars().collect();
-        assert_eq!(wrap_chars(&chars, 2), vec!["ab", "cd", "ef"]);
+    fn visual_rows_breaks_on_newline_and_wraps() {
+        let chars: Vec<char> = "abcd\nef".chars().collect();
+        let rows = visual_rows(&chars, 2);
+        let texts: Vec<String> = rows
+            .iter()
+            .map(|r| chars[r.start..r.start + r.len].iter().collect())
+            .collect();
+        assert_eq!(texts, vec!["ab", "cd", "ef"]);
+    }
+
+    #[test]
+    fn cursor_rc_defers_soft_wrap_boundary_to_next_row() {
+        let chars: Vec<char> = "abcd".chars().collect();
+        let rows = visual_rows(&chars, 2); // [{0,2},{2,2}]
+        assert_eq!(cursor_rc(&rows, 0), (0, 0));
+        assert_eq!(cursor_rc(&rows, 2), (1, 0)); // boundary -> next row start
+        assert_eq!(cursor_rc(&rows, 4), (1, 2)); // end of text
     }
 }

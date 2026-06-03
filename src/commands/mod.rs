@@ -6,6 +6,7 @@ pub mod edit;
 pub mod history;
 pub mod info;
 pub mod list;
+pub mod open;
 
 use crate::cli::{Cli, Cmd, HistoryCmd, OutputFormat};
 use crate::clock::Clock;
@@ -67,6 +68,14 @@ pub fn dispatch(
             }
         }
         Some(Cmd::List {
+            id: Some(task_id), ..
+        }) => {
+            // `task list <id>` / `task ls <id>` is a shortcut for `task info <id>`.
+            let output = info::run(*task_id, store, &opts)?;
+            print!("{output}");
+        }
+        Some(Cmd::List {
+            id: None,
             active,
             completed,
             deleted,
@@ -104,6 +113,15 @@ pub fn dispatch(
         Some(Cmd::Info { id }) => {
             let output = info::run(*id, store, &opts)?;
             print!("{output}");
+        }
+        Some(Cmd::Open { id, index }) => {
+            if let Some(url) = open::run(*id, *index, store, tty)? {
+                if md {
+                    println!("**Opening** {url}");
+                } else {
+                    println!("Opening {url}");
+                }
+            }
         }
         Some(Cmd::Clear { yes }) => {
             let stats = clear::run(*yes, store, prompt)?;
