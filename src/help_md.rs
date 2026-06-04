@@ -122,7 +122,7 @@ If no command is given, the interactive TUI opens.
 
 ## Commands
 
-- **add** `ARGS...` — Add a new task.
+- **add** `[ARGS]...` — Add a new task; with no args, opens the editor (TTY only).
 - **list** `[ID]` — List tasks (active by default); with an ID, show that task's details.
 - **edit** `ID [ARGS]...` — Edit a task. With no args, opens the text editor.
 - **delete** `ID` — Soft-delete a task (recoverable via `history`).
@@ -188,11 +188,19 @@ Run `task <COMMAND> --help --format md` for command-specific markdown help.
 const ADD: &str = "\
 # task add
 
-Add a new task.
+Add a new task. With no arguments, opens the built-in text editor in the terminal
+(the same form as the `a` key in the `task` view); type the text and `Esc` to save.
 
 ## Usage
 
-`task add ARGS...`
+`task add [ARGS]...`
+
+## ⚠ Notice for LLM agents
+
+**Always pass the task text as args.** Calling `task add` with no arguments opens
+the interactive editor and will hang your tool call (it needs a TTY). Pass the text
+directly instead — `task add Buy milk`, optionally with `c:` / `ord:` / `est:`
+fields and a trailing/leading duration.
 
 ## Examples
 
@@ -265,10 +273,10 @@ Edit an existing task.
 
 With no field args, opens the built-in text editor inside the terminal — an
 interactive TUI that blocks on input. `Enter` inserts a newline (tasks may carry a
-multi-line description); `Esc` (or `Ctrl+C`) saves and exits — there is no discard
-key. `Ctrl+left` / `Ctrl+right` jump by word. For a single-line task a duration
-token at the start or end (e.g. `Buy milk 45m`) still sets the estimate. Category
-and ord are not editable from the editor.
+multi-line description); `Esc` saves and exits. A duration token at the end of
+the text (e.g. `Buy milk 45m`) sets the
+estimate, including on a multi-line description; on a single-line task a leading
+token works too. Category and ord are not editable from the editor.
 
 ## ⚠ Notice for LLM agents
 

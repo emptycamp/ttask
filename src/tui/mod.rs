@@ -8,11 +8,7 @@ use crate::format::sort_key;
 use crate::model::{Category, Status, Task, TaskId};
 use crate::store::{Store, StoreSnapshot};
 use crate::tui::events::Action;
-use crossterm::{
-    event::{self, Event, KeyEventKind},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
+use crossterm::event::{self, Event, KeyEventKind};
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 use std::io;
@@ -102,15 +98,22 @@ impl UndoStacks {
 
 pub fn run(store: &mut Store, clock: &dyn Clock, editor: &dyn TaskEditor) -> Result<()> {
     let mut app = App::new(load_active_tasks(store)?);
-
-    enter_screen()?;
-    let mut terminal = build_terminal()?;
-
-    let result = run_loop(&mut terminal, &mut app, store, clock, editor);
-
-    leave_screen(&mut terminal);
-
+    // `enter`/`leave` bracket the whole session and balance even if `run_on_screen`
+    // bails out building the terminal, so the screen is always restored on exit.
+    crate::screen::enter()?;
+    let result = run_on_screen(&mut app, store, clock, editor);
+    crate::screen::leave();
     result
+}
+
+fn run_on_screen(
+    app: &mut App,
+    store: &mut Store,
+    clock: &dyn Clock,
+    editor: &dyn TaskEditor,
+) -> Result<()> {
+    let mut terminal = build_terminal()?;
+    run_loop(&mut terminal, app, store, clock, editor)
 }
 
 fn load_active_tasks(store: &Store) -> Result<Vec<Task>> {
@@ -128,16 +131,14 @@ fn build_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
     Terminal::new(backend).map_err(Error::Io)
 }
 
-fn enter_screen() -> Result<()> {
-    enable_raw_mode().map_err(Error::Io)?;
-    execute!(io::stdout(), EnterAlternateScreen).map_err(Error::Io)?;
+/// Repaint the list after a nested full-screen UI (editor or link picker) drew over
+/// our screen. Those UIs use their own `Terminal`, so ours believes the list is still
+/// on screen and would skip the redraw; `clear` forces a full repaint. Drawing again
+/// right away keeps the blank from being visible.
+fn force_redraw(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &App) -> Result<()> {
+    terminal.clear().map_err(Error::Io)?;
+    terminal.draw(|f| render::draw(f, app)).map_err(Error::Io)?;
     Ok(())
-}
-
-fn leave_screen(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
-    let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
-    let _ = terminal.show_cursor();
 }
 
 fn run_loop(
@@ -173,15 +174,17 @@ fn run_loop(
             Action::EditTask(id) => {
                 app.status = None;
                 run_mutation(store, &mut stacks, |store| {
-                    with_paused_terminal(terminal, || edit_existing(id, store, clock, editor))
+                    edit_existing(id, store, clock, editor)
                 })?;
                 refresh_tasks(app, store)?;
+                // The editor drew over our screen (sharing the alternate screen), so
+                // repaint the list cleanly over it.
+                force_redraw(terminal, app)?;
             }
             Action::AddTask => {
                 app.status = None;
-                let new_id = run_mutation(store, &mut stacks, |store| {
-                    with_paused_terminal(terminal, || add_new(store, clock, editor))
-                })?;
+                let new_id =
+                    run_mutation(store, &mut stacks, |store| add_new(store, clock, editor))?;
                 refresh_tasks(app, store)?;
                 // Land the cursor on the freshly created task so it can be acted
                 // on immediately without navigating.
@@ -190,6 +193,7 @@ fn run_loop(
                         app.cursor = pos;
                     }
                 }
+                force_redraw(terminal, app)?;
             }
             Action::ReorderCursor(target_ord) => {
                 if let Some(id) = app.cursor_task().map(|t| t.id) {
@@ -227,17 +231,21 @@ fn run_loop(
             Action::OpenLink(id) => {
                 app.status = None;
                 // Opening a link doesn't touch the store, so it's not an undoable
-                // mutation. Pause the TUI so the (possible) link picker owns the
-                // screen, then report the outcome in the footer.
+                // mutation. A single link opens straight away without drawing anything;
+                // only the multi-link picker takes over the screen, so only then do we
+                // need to repaint afterwards.
+                let needs_repaint = open_shows_picker(store, id);
                 let store_ref: &Store = store;
-                let outcome = with_paused_terminal(terminal, || {
-                    crate::commands::open::run(id, None, store_ref, &crate::commands::SystemTty)
-                });
+                let outcome =
+                    crate::commands::open::run(id, None, store_ref, &crate::commands::SystemTty);
                 app.status = Some(match outcome {
                     Ok(Some(url)) => format!("opened {url}"),
                     Ok(None) => "open cancelled".to_string(),
                     Err(e) => format!("{e}"),
                 });
+                if needs_repaint {
+                    force_redraw(terminal, app)?;
+                }
             }
             Action::Undo => {
                 undo(store, &mut stacks, app)?;
@@ -312,24 +320,14 @@ fn set_category(
     store.update_task_with_revert(before, after, clock)
 }
 
-fn with_paused_terminal<F, T>(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    f: F,
-) -> Result<T>
-where
-    F: FnOnce() -> Result<T>,
-{
-    let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
-    let _ = terminal.show_cursor();
-
-    let result = f();
-
-    let _ = enable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), EnterAlternateScreen);
-    let _ = terminal.clear();
-
-    result
+/// Whether opening task `id` would pop the interactive link picker — i.e. it has
+/// more than one link. A single link (or none) never draws, so the caller can skip
+/// the post-open repaint and keep the screen perfectly still.
+fn open_shows_picker(store: &Store, id: TaskId) -> bool {
+    store
+        .get_task(id)
+        .map(|t| crate::commands::open::extract_links(&t.text).len() > 1)
+        .unwrap_or(false)
 }
 
 fn edit_existing(
@@ -353,50 +351,14 @@ fn edit_existing(
 }
 
 /// Returns the id of the created task, or `None` if the editor was cancelled
-/// before anything was saved (so the caller can move the cursor onto it).
+/// before anything was saved (so the caller can move the cursor onto it). Shares the
+/// form path with `task add` (no args) via `commands::add::run_form`.
 fn add_new(
     store: &mut Store,
     clock: &dyn Clock,
     editor: &dyn TaskEditor,
 ) -> Result<Option<TaskId>> {
-    let now = clock.now();
-    let next_ord = store.next_active_ord(Category::B)?;
-    let template = Task {
-        id: 0,
-        text: String::new(),
-        category: Category::B,
-        ord: next_ord,
-        est_secs: 1800,
-        status: Status::Active,
-        created_at: now,
-        updated_at: now,
-        completed_at: None,
-        deleted_at: None,
-    };
-    let mut baseline: Option<Task> = None;
-    {
-        let mut save = |proposed: Task| -> Result<Task> {
-            match &baseline {
-                None => {
-                    let mut t = proposed;
-                    t.id = store.next_id()?;
-                    let created = store.add_task_with_revert(t, clock)?;
-                    baseline = Some(created.clone());
-                    Ok(created)
-                }
-                Some(prev) => {
-                    if &proposed == prev {
-                        return Ok(proposed);
-                    }
-                    store.update_task_with_revert(prev.clone(), proposed.clone(), clock)?;
-                    baseline = Some(proposed.clone());
-                    Ok(proposed)
-                }
-            }
-        };
-        editor.edit(&template, &mut save)?;
-    }
-    Ok(baseline.map(|t| t.id))
+    Ok(crate::commands::add::run_form(store, clock, editor)?.map(|t| t.id))
 }
 
 fn refresh_tasks(app: &mut App, store: &Store) -> Result<()> {

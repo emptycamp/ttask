@@ -1,4 +1,5 @@
 use crate::clock::Clock;
+use crate::editor::TaskEditor;
 use crate::error::{Error, Result};
 use crate::model::{Category, Status, Task};
 use crate::store::order;
@@ -70,6 +71,57 @@ pub fn run(args: &[String], store: &mut Store, clock: &dyn Clock) -> Result<Task
     store.get_task(created.id)
 }
 
+/// Add a new task through the built-in form editor (no field args). Returns the
+/// created task, or `None` if the editor was cancelled before anything was saved.
+/// This is what `task add` (with no args) and the `a` key in the `task` view both
+/// use, so the new task lands as a revertable history event either way.
+pub fn run_form(
+    store: &mut Store,
+    clock: &dyn Clock,
+    editor: &dyn TaskEditor,
+) -> Result<Option<Task>> {
+    let now = clock.now();
+    let next_ord = store.next_active_ord(Category::B)?;
+    let template = Task {
+        id: 0,
+        text: String::new(),
+        category: Category::B,
+        ord: next_ord,
+        est_secs: 1800,
+        status: Status::Active,
+        created_at: now,
+        updated_at: now,
+        completed_at: None,
+        deleted_at: None,
+    };
+    let mut created: Option<Task> = None;
+    {
+        let mut save = |proposed: Task| -> Result<Task> {
+            match &created {
+                // First save assigns the real id and inserts the task.
+                None => {
+                    let mut t = proposed;
+                    t.id = store.next_id()?;
+                    let saved = store.add_task_with_revert(t, clock)?;
+                    created = Some(saved.clone());
+                    Ok(saved)
+                }
+                // Subsequent saves (`:w` again) update the already-created task.
+                Some(prev) => {
+                    if &proposed == prev {
+                        return Ok(proposed);
+                    }
+                    store.update_task_with_revert(prev.clone(), proposed.clone(), clock)?;
+                    created = Some(proposed.clone());
+                    Ok(proposed)
+                }
+            }
+        };
+        editor.edit(&template, &mut save)?;
+    }
+    Ok(created)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,6 +135,53 @@ mod tests {
 
     fn open_store(dir: &std::path::Path) -> Store {
         Store::open(dir).unwrap()
+    }
+
+    /// Editor stub that saves a single task with the given text.
+    struct SavingEditor {
+        text: String,
+    }
+    impl TaskEditor for SavingEditor {
+        fn edit(&self, task: &Task, save: &mut crate::editor::Saver<'_>) -> Result<()> {
+            let mut t = task.clone();
+            t.text = self.text.clone();
+            save(t)?;
+            Ok(())
+        }
+    }
+
+    /// Editor stub that cancels without saving.
+    struct CancellingEditor;
+    impl TaskEditor for CancellingEditor {
+        fn edit(&self, _task: &Task, _save: &mut crate::editor::Saver<'_>) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn run_form_creates_task_from_editor() {
+        let dir = tempdir().unwrap();
+        let mut store = open_store(dir.path());
+        let clock = make_clock();
+        let editor = SavingEditor {
+            text: "From the editor".into(),
+        };
+        let created = run_form(&mut store, &clock, &editor).unwrap();
+        let task = created.expect("a task should have been created");
+        assert_eq!(task.text, "From the editor");
+        assert_eq!(task.category, Category::B);
+        assert_eq!(store.get_task(task.id).unwrap().text, "From the editor");
+    }
+
+    #[test]
+    fn run_form_returns_none_when_cancelled() {
+        let dir = tempdir().unwrap();
+        let mut store = open_store(dir.path());
+        let clock = make_clock();
+        assert!(run_form(&mut store, &clock, &CancellingEditor)
+            .unwrap()
+            .is_none());
+        assert!(store.all_tasks().unwrap().is_empty());
     }
 
     #[test]

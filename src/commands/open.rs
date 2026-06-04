@@ -8,10 +8,6 @@ use crate::error::{Error, Result};
 use crate::model::TaskId;
 use crate::store::Store;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
-use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style};
@@ -187,19 +183,23 @@ fn opener_spec(os: &str, url: &str) -> (&'static str, Vec<String>) {
 }
 
 fn pick_link(links: &[String]) -> Result<Option<String>> {
-    enable_raw_mode().map_err(Error::Io)?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen).map_err(Error::Io)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend).map_err(Error::Io)?;
-
-    let result = pick_loop(&mut terminal, links);
-
-    let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
-    let _ = terminal.show_cursor();
-
+    // Reuse the main TUI's alternate screen when the picker is opened from inside it
+    // (the `o` key), so there's no leave/re-enter flicker. `enter`/`leave` are
+    // balanced regardless of how `pick_on_screen` returns.
+    crate::screen::enter()?;
+    let result = pick_on_screen(links);
+    crate::screen::leave();
     result
+}
+
+fn pick_on_screen(links: &[String]) -> Result<Option<String>> {
+    let backend = CrosstermBackend::new(io::stdout());
+    let mut terminal = Terminal::new(backend).map_err(Error::Io)?;
+    // Shared alternate screen (see `screen`): clear whatever the main TUI drew before
+    // painting the picker, otherwise this terminal's diff skips the picker's blank cells
+    // and the list underneath shows through.
+    terminal.clear().map_err(Error::Io)?;
+    pick_loop(&mut terminal, links)
 }
 
 fn pick_loop(

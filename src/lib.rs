@@ -9,6 +9,7 @@ pub mod format;
 pub mod help_md;
 pub mod history_tui;
 pub mod model;
+pub mod screen;
 pub mod store;
 pub mod time;
 pub mod tui;

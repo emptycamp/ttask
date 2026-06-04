@@ -152,6 +152,29 @@ pub fn split_estimate(text: &str) -> (String, Option<i64>) {
     (trimmed.to_string(), None)
 }
 
+/// Pull a duration token off the very end of `text`, preserving everything else
+/// verbatim (internal newlines and spacing are kept). Unlike [`split_estimate`] this
+/// is safe on multi-line input: only the final whitespace-separated token is
+/// considered, so a duration buried in the body is left in the text. The text is
+/// never reduced to empty. Used by the edit TUI so a duration typed at the end of a
+/// multi-line description still updates the estimate.
+pub fn split_trailing_estimate(text: &str) -> (String, Option<i64>) {
+    let trimmed = text.trim();
+    let Some(last) = trimmed.split_whitespace().next_back() else {
+        return (trimmed.to_string(), None);
+    };
+    let Some(secs) = duration_token_secs(last) else {
+        return (trimmed.to_string(), None);
+    };
+    // `last` is a suffix of `trimmed` (no trailing whitespace after the trim), so its
+    // start byte is `len - len`, a valid char boundary.
+    let remaining = trimmed[..trimmed.len() - last.len()].trim_end();
+    if remaining.is_empty() {
+        return (trimmed.to_string(), None);
+    }
+    (remaining.to_string(), Some(secs))
+}
+
 fn duration_token_secs(tok: &str) -> Option<i64> {
     let has_digit = tok.chars().any(|c| c.is_ascii_digit());
     let has_unit = tok.chars().any(|c| c.is_ascii_alphabetic());
@@ -341,5 +364,41 @@ mod tests {
         let (text, est) = split_estimate("1h some task 30m");
         assert_eq!(text, "1h some task");
         assert_eq!(est, Some(1800));
+    }
+
+    #[test]
+    fn split_trailing_estimate_pulls_token_off_multiline_end() {
+        let (text, est) = split_trailing_estimate("Buy milk\n- oat too 45m");
+        assert_eq!(text, "Buy milk\n- oat too");
+        assert_eq!(est, Some(45 * 60));
+    }
+
+    #[test]
+    fn split_trailing_estimate_handles_duration_on_its_own_line() {
+        let (text, est) = split_trailing_estimate("Buy milk\n30m");
+        assert_eq!(text, "Buy milk");
+        assert_eq!(est, Some(1800));
+    }
+
+    #[test]
+    fn split_trailing_estimate_ignores_non_trailing_token() {
+        let (text, est) = split_trailing_estimate("spent 2h\nreading notes");
+        assert_eq!(text, "spent 2h\nreading notes");
+        assert_eq!(est, None);
+    }
+
+    #[test]
+    fn split_trailing_estimate_keeps_lone_duration_as_text() {
+        // Stripping it would leave nothing, so it stays text.
+        let (text, est) = split_trailing_estimate("30m");
+        assert_eq!(text, "30m");
+        assert_eq!(est, None);
+    }
+
+    #[test]
+    fn split_trailing_estimate_ignores_url_tail() {
+        let (text, est) = split_trailing_estimate("read\nhttps://example.com/path");
+        assert_eq!(text, "read\nhttps://example.com/path");
+        assert_eq!(est, None);
     }
 }

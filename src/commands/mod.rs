@@ -56,15 +56,23 @@ pub fn dispatch(
             tui::run(store, clock, editor)?;
         }
         Some(Cmd::Add { args }) => {
-            let task = add::run(args, store, clock)?;
-            if md {
-                print!("{}", crate::format::format_info_md(&task));
+            // No args opens the built-in editor (same as `a` in the `task` view);
+            // a cancelled editor creates nothing, so there's nothing to report.
+            let created = if args.is_empty() {
+                add::run_form(store, clock, editor)?
             } else {
-                println!(
-                    "Added task #{}: {}",
-                    task.id,
-                    sanitize_for_terminal(&task.text),
-                );
+                Some(add::run(args, store, clock)?)
+            };
+            if let Some(task) = created {
+                if md {
+                    print!("{}", crate::format::format_info_md(&task));
+                } else {
+                    println!(
+                        "Added task #{}: {}",
+                        task.id,
+                        sanitize_for_terminal(&task.text),
+                    );
+                }
             }
         }
         Some(Cmd::List {

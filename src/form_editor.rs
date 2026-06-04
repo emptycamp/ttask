@@ -1,13 +1,17 @@
 //! Built-in multi-line text editor for tasks.
 //!
 //! A small text area, pre-filled with the task's text. `Enter` inserts a newline so
-//! a task can carry a multi-line description; `Esc` (or `Ctrl+C`) finishes and saves
-//! — there is intentionally no discard key. `Ctrl+←`/`Ctrl+→` jump by word.
+//! a task can carry a multi-line description. `Esc` saves and leaves; `Ctrl+C`
+//! discards any changes and leaves (a brand-new task is simply not created).
+//! Standard editor navigation and editing keys (word jumps and word delete) work as
+//! usual. Pasting is handled atomically via the terminal's bracketed-paste mode, so
+//! a long URL lands intact.
 //!
-//! For a single-line task the duration shorthand still applies: a duration token at
-//! the start or end of the text (e.g. `Buy milk 45m`, `4.5h plan sprint`) is pulled
-//! out into the estimate on save. A multi-line description is stored verbatim, so its
-//! newlines survive (they collapse to spaces only in the compact `task ls` view).
+//! A duration token at the *end* of the text (e.g. `Buy milk 45m`) is pulled out into
+//! the estimate on save — this works for multi-line descriptions too, where only a
+//! token at the very end counts. For single-line input a *leading* token (e.g.
+//! `4.5h plan sprint`) is also recognized. The remaining text is stored verbatim, so
+//! its newlines survive (they collapse to spaces only in the compact `task ls` view).
 //! Category and ord are not editable here — those are changed from the main `task`
 //! view.
 
@@ -15,12 +19,12 @@ use crate::editor::Saver;
 use crate::error::{Error, Result};
 use crate::format::format_est;
 use crate::model::Task;
-use crate::time::parse_fields::split_estimate;
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use crossterm::execute;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+use crate::time::parse_fields::{split_estimate, split_trailing_estimate};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
 };
+use crossterm::execute;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Style};
@@ -48,39 +52,37 @@ impl State {
         }
     }
 
-    /// The estimate the current input would apply. The trailing/leading duration
-    /// shorthand only applies to single-line input; a multi-line description is
-    /// stored verbatim, so the estimate stays at the unchanged baseline.
+    /// The estimate the current input would apply. Falls back to the unchanged
+    /// baseline when no duration shorthand is present in the text.
     fn effective_est_secs(&self) -> i64 {
-        match self.detected_est() {
-            Some(secs) => secs,
-            None => self.baseline_est_secs,
-        }
+        self.detected_est().unwrap_or(self.baseline_est_secs)
     }
 
-    /// The estimate detected from a single-line duration token, if any.
+    /// The estimate detected from a duration token in the text, if any.
     fn detected_est(&self) -> Option<i64> {
-        if self.input.contains('\n') {
-            return None;
-        }
-        split_estimate(&self.input).1
+        self.split_text_est().1
     }
 
-    /// Build the proposed task from `baseline`, applying the typed text. A duration
-    /// token is pulled into the estimate only for single-line input; multi-line text
-    /// keeps its newlines. Errors if the text would be empty.
-    pub fn commit(&self, baseline: &Task) -> std::result::Result<Task, String> {
+    /// Split the input into the stored text and the estimate its duration shorthand
+    /// implies. Single-line input recognizes a leading *or* trailing token; multi-line
+    /// input only honors a token at the very end (typed after the description) so a
+    /// duration buried in the body is left alone, and its newlines are preserved.
+    fn split_text_est(&self) -> (String, Option<i64>) {
         let trimmed = self.input.trim();
-        if trimmed.is_empty() {
-            return Err("text cannot be empty".into());
-        }
-        // Multi-line text is stored verbatim (newlines preserved); only single-line
-        // input feeds the `45m`-style estimate shorthand.
-        let (text, est) = if trimmed.contains('\n') {
-            (trimmed.to_string(), None)
+        if trimmed.contains('\n') {
+            split_trailing_estimate(trimmed)
         } else {
             split_estimate(trimmed)
-        };
+        }
+    }
+
+    /// Build the proposed task from `baseline`, applying the typed text and any
+    /// detected estimate. Errors if the text would be empty.
+    pub fn commit(&self, baseline: &Task) -> std::result::Result<Task, String> {
+        if self.input.trim().is_empty() {
+            return Err("text cannot be empty".into());
+        }
+        let (text, est) = self.split_text_est();
         let mut updated = baseline.clone();
         updated.text = text;
         if let Some(secs) = est {
@@ -92,21 +94,30 @@ impl State {
 
 pub enum Action {
     Continue,
-    /// Leave the editor. The run-loop saves the committed task if it's non-empty; an
-    /// empty buffer simply exits without saving (there is nothing to discard).
-    Exit,
+    /// Save and leave (Esc). The run-loop commits the typed task if it's non-empty; an
+    /// empty buffer just exits without saving (a brand-new task is not created).
+    Save,
+    /// Discard and leave (Ctrl+C). The run-loop returns without saving, so the task is
+    /// left exactly as it was — and a brand-new task is not created.
+    Cancel,
 }
 
 pub fn handle_key(state: &mut State, key: KeyEvent) -> Action {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     match key.code {
-        // Esc / Ctrl+C save and leave — there is intentionally no discard key.
-        KeyCode::Esc => return Action::Exit,
-        KeyCode::Char('c') if ctrl => return Action::Exit,
+        // Esc saves and leaves; Ctrl+C discards and leaves.
+        KeyCode::Esc => return Action::Save,
+        KeyCode::Char('c') if ctrl => return Action::Cancel,
         // Enter inserts a newline; Esc is how you finish.
         KeyCode::Enter => insert_char(&mut state.input, &mut state.cursor, '\n'),
         KeyCode::Char(c) if !ctrl => insert_char(&mut state.input, &mut state.cursor, c),
+        // Ctrl/Alt + Backspace/Delete remove a whole word (to where the matching word
+        // jump would land); the plain keys fall through to single-char deletes below.
+        KeyCode::Backspace if ctrl || alt => {
+            delete_word_before(&mut state.input, &mut state.cursor)
+        }
+        KeyCode::Delete if ctrl || alt => delete_word_at(&mut state.input, &mut state.cursor),
         KeyCode::Backspace => delete_before(&mut state.input, &mut state.cursor),
         KeyCode::Delete => delete_at(&mut state.input, &mut state.cursor),
         // Ctrl+←/→ (also Alt, which some terminals send) jump by word.
@@ -157,6 +168,39 @@ fn delete_at(text: &mut String, cursor: &mut usize) {
     }
     let byte_idx = char_to_byte_idx(text, *cursor);
     text.remove(byte_idx);
+}
+
+/// Insert a whole string at the cursor (used for bracketed paste). Pasted line
+/// breaks are normalized to `\n` so the payload matches the editor's own newline
+/// handling and never leaves a bare `\r` behind.
+fn insert_str(text: &mut String, cursor: &mut usize, s: &str) {
+    let normalized = s.replace("\r\n", "\n").replace('\r', "\n");
+    let byte_idx = char_to_byte_idx(text, *cursor);
+    text.insert_str(byte_idx, &normalized);
+    *cursor += normalized.chars().count();
+}
+
+/// Delete the word before the cursor — everything back to where `Ctrl+←` would land.
+fn delete_word_before(text: &mut String, cursor: &mut usize) {
+    let start = prev_word(&char_vec(text), *cursor);
+    delete_char_range(text, start, *cursor);
+    *cursor = start;
+}
+
+/// Delete the word at/after the cursor — up to where `Ctrl+→` would land.
+fn delete_word_at(text: &mut String, cursor: &mut usize) {
+    let end = next_word(&char_vec(text), *cursor);
+    delete_char_range(text, *cursor, end);
+}
+
+/// Remove the half-open char range `[start, end)` from `text`.
+fn delete_char_range(text: &mut String, start: usize, end: usize) {
+    if start >= end {
+        return;
+    }
+    let start_b = char_to_byte_idx(text, start);
+    let end_b = char_to_byte_idx(text, end);
+    text.replace_range(start_b..end_b, "");
 }
 
 fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
@@ -369,7 +413,7 @@ fn draw(frame: &mut Frame, state: &State) {
 
     frame.render_widget(
         Paragraph::new(Span::styled(
-            " Esc save · Enter newline · Ctrl+←/→ word · a trailing duration (e.g. 45m) sets the estimate ",
+            " Esc save · Enter newline · a trailing duration (e.g. 45m) sets the estimate ",
             Style::default().fg(Color::DarkGray),
         )),
         chunks[2],
@@ -380,22 +424,31 @@ pub fn run(task: &Task, save: &mut Saver<'_>) -> Result<()> {
     use std::io::IsTerminal;
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(Error::Parse(
-            "the editor requires a TTY; pass field args instead, e.g. `task edit <id> c:a` or `task edit <id> ord:1`".into(),
+            "the editor requires a TTY; pass field args instead, e.g. `task add Buy milk 30m` or `task edit <id> c:a`".into(),
         ));
     }
-    enable_raw_mode().map_err(Error::Io)?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen).map_err(Error::Io)?;
+    // Share the alternate screen with a possibly-already-open main TUI so opening the
+    // editor doesn't flicker. `enter`/`leave` are balanced regardless of how the run
+    // goes, so we never leak the screen.
+    crate::screen::enter()?;
+    let result = run_on_screen(task, save);
+    crate::screen::leave();
+    result
+}
 
-    let backend = CrosstermBackend::new(stdout);
+fn run_on_screen(task: &Task, save: &mut Saver<'_>) -> Result<()> {
+    let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).map_err(Error::Io)?;
-
+    // The alternate screen is shared (see `screen`), so a main TUI underneath may have
+    // left its rows on it. This fresh terminal diffs against an empty buffer and would
+    // skip the editor's blank cells, letting that text show through — clear once so the
+    // first draw paints over a blank screen instead of on top of the list.
+    terminal.clear().map_err(Error::Io)?;
+    // Bracketed paste makes the terminal deliver a paste as one `Event::Paste` instead
+    // of a stream of keystrokes, so a long URL arrives whole rather than partially.
+    let _ = execute!(io::stdout(), EnableBracketedPaste);
     let result = run_loop(&mut terminal, task, save);
-
-    let _ = disable_raw_mode();
-    let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
-    let _ = terminal.show_cursor();
-
+    let _ = execute!(io::stdout(), DisableBracketedPaste);
     result
 }
 
@@ -409,23 +462,24 @@ fn run_loop(
     loop {
         terminal.draw(|f| draw(f, &state)).map_err(Error::Io)?;
 
-        let event = event::read().map_err(Error::Io)?;
-        let key = match event {
-            Event::Key(k) if k.kind == KeyEventKind::Press => k,
-            _ => continue,
-        };
-
-        match handle_key(&mut state, key) {
-            Action::Continue => {}
-            Action::Exit => match state.commit(&baseline) {
-                Ok(updated) => {
-                    save(updated)?;
-                    return Ok(());
-                }
-                // Empty buffer: nothing valid to save, so just leave the task as it
-                // was (a brand-new task is simply not created).
-                Err(_) => return Ok(()),
+        match event::read().map_err(Error::Io)? {
+            Event::Key(k) if k.kind == KeyEventKind::Press => match handle_key(&mut state, k) {
+                Action::Continue => {}
+                Action::Save => match state.commit(&baseline) {
+                    Ok(updated) => {
+                        save(updated)?;
+                        return Ok(());
+                    }
+                    // Empty buffer: nothing valid to save, so just leave the task as it
+                    // was (a brand-new task is simply not created).
+                    Err(_) => return Ok(()),
+                },
+                // Discard: leave without committing, so no save happens at all.
+                Action::Cancel => return Ok(()),
             },
+            // A whole pasted payload (bracketed paste) lands at the cursor at once.
+            Event::Paste(data) => insert_str(&mut state.input, &mut state.cursor, &data),
+            _ => {}
         }
     }
 }
@@ -482,20 +536,20 @@ mod tests {
     }
 
     #[test]
-    fn esc_exits() {
+    fn esc_saves() {
         let mut state = State::from_task(&make_task());
         assert!(matches!(
             handle_key(&mut state, key(KeyCode::Esc)),
-            Action::Exit
+            Action::Save
         ));
     }
 
     #[test]
-    fn ctrl_c_exits() {
+    fn ctrl_c_cancels() {
         let mut state = State::from_task(&make_task());
         assert!(matches!(
             handle_key(&mut state, ctrl(KeyCode::Char('c'))),
-            Action::Exit
+            Action::Cancel
         ));
     }
 
@@ -536,6 +590,58 @@ mod tests {
         assert_eq!(state.cursor, 4); // start of "two" (after the newline)
         handle_key(&mut state, ctrl(KeyCode::Left));
         assert_eq!(state.cursor, 0); // start of "one"
+    }
+
+    #[test]
+    fn ctrl_backspace_deletes_word_before_cursor() {
+        let mut state = State::from_task(&make_task()); // "Buy milk", cursor at 8
+        handle_key(&mut state, ctrl(KeyCode::Backspace));
+        assert_eq!(state.input, "Buy ");
+        assert_eq!(state.cursor, 4);
+    }
+
+    #[test]
+    fn ctrl_delete_deletes_word_after_cursor() {
+        let mut state = State::from_task(&make_task()); // "Buy milk"
+        state.cursor = 0;
+        handle_key(&mut state, ctrl(KeyCode::Delete));
+        assert_eq!(state.input, "milk"); // "Buy " removed
+        assert_eq!(state.cursor, 0);
+    }
+
+    #[test]
+    fn ctrl_delete_at_end_is_noop() {
+        let mut state = State::from_task(&make_task()); // cursor at end
+        handle_key(&mut state, ctrl(KeyCode::Delete));
+        assert_eq!(state.input, "Buy milk");
+    }
+
+    #[test]
+    fn paste_inserts_whole_string_at_cursor() {
+        let mut task = make_task();
+        task.text = String::new();
+        let mut state = State::from_task(&task);
+        insert_str(
+            &mut state.input,
+            &mut state.cursor,
+            "https://example.com/a?b=1&c=2#x",
+        );
+        assert_eq!(state.input, "https://example.com/a?b=1&c=2#x");
+        assert_eq!(state.cursor, state.input.chars().count());
+    }
+
+    #[test]
+    fn paste_normalizes_crlf_to_newline() {
+        let mut task = make_task();
+        task.text = String::new();
+        let mut state = State::from_task(&task);
+        insert_str(
+            &mut state.input,
+            &mut state.cursor,
+            "line one\r\nline two\r",
+        );
+        assert_eq!(state.input, "line one\nline two\n");
+        assert!(!state.input.contains('\r'));
     }
 
     #[test]
@@ -605,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    fn commit_preserves_newlines_and_skips_estimate_shorthand() {
+    fn commit_extracts_trailing_duration_from_multiline_text() {
         let task = make_task();
         let mut state = State::from_task(&task);
         handle_key(&mut state, key(KeyCode::Enter));
@@ -613,10 +719,30 @@ mod tests {
             handle_key(&mut state, key(KeyCode::Char(c)));
         }
         let updated = state.commit(&task).unwrap();
-        // Newlines survive, and the trailing `30m` is NOT treated as an estimate
-        // because the text is multi-line.
-        assert_eq!(updated.text, "Buy milk\nextra 30m");
+        // Newlines survive, and a duration typed at the very end still sets the
+        // estimate even though the text is multi-line.
+        assert_eq!(updated.text, "Buy milk\nextra");
+        assert_eq!(updated.est_secs, 30 * 60);
+    }
+
+    #[test]
+    fn commit_keeps_duration_buried_in_multiline_text() {
+        let mut task = make_task();
+        task.text = "spend 2h\non research".to_string();
+        let state = State::from_task(&task);
+        let updated = state.commit(&task).unwrap();
+        // The `2h` is not at the end, so it stays in the body and the estimate is
+        // left at the baseline.
+        assert_eq!(updated.text, "spend 2h\non research");
         assert_eq!(updated.est_secs, 1800);
+    }
+
+    #[test]
+    fn detected_est_updates_live_for_multiline_trailing_duration() {
+        let mut task = make_task();
+        task.text = "notes\nplan 45m".to_string();
+        let state = State::from_task(&task);
+        assert_eq!(state.detected_est(), Some(45 * 60));
     }
 
     #[test]

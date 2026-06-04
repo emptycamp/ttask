@@ -56,6 +56,41 @@ fn add_no_text_returns_error() {
 }
 
 #[test]
+fn add_no_args_opens_editor_and_creates_task() {
+    let scope = StoreScope::new();
+    task(&scope)
+        .args(["add"])
+        .env(
+            "TASK_EDIT_YAML",
+            "text: Editor task\ncategory: A\nord: 1\nest: 15m\n",
+        )
+        .assert()
+        .success()
+        .stdout(contains("Added task #1"));
+    task(&scope)
+        .args(["list"])
+        .assert()
+        .success()
+        .stdout(contains("Editor task"));
+}
+
+#[test]
+fn add_no_args_cancelled_editor_creates_nothing() {
+    let scope = StoreScope::new();
+    task(&scope)
+        .args(["add"])
+        .env("TASK_EDIT_CANCEL", "1")
+        .assert()
+        .success();
+    // Nothing was created and no id was consumed, so the next real add is #1.
+    task(&scope)
+        .args(["add", "Real task"])
+        .assert()
+        .success()
+        .stdout(contains("Added task #1"));
+}
+
+#[test]
 fn add_appears_in_list() {
     let scope = StoreScope::new();
     task(&scope)

@@ -25,9 +25,11 @@ pub enum Cmd {
     /// Add a new task.
     #[command(aliases = ["create", "new"])]
     #[command(long_about = "\
-Add a new task.
+Add a new task. With no arguments, opens the built-in editor (same as pressing `a`
+in the `task` view); type the task text and Esc to save.
 
 Examples:
+  task add                       # open the editor for a new task
   task add Buy milk
   task add Buy milk 30m
   task add Read book c:a est:1h
@@ -93,12 +95,12 @@ Edit an existing task.
 
 With no field args, opens the built-in text editor inside the terminal: a small
 text area pre-filled with the task text. Enter inserts a newline (tasks may carry a
-multi-line description); Esc — or Ctrl+C — saves and exits. There is no discard
-key. Ctrl+left / Ctrl+right jump by word. For a single-line task a duration token
-at the start or end (e.g. `Buy milk 45m`) still sets the estimate. Category and ord
-are changed from the main `task` view or via args, not in the editor. The editor
-requires a real TTY; in scripts or piped contexts, pass field args
-(c:/ord:/est:/text) directly.
+multi-line description); Esc saves and exits. A duration token at the end of the
+text (e.g. `Buy milk 45m`) sets the estimate,
+including on a multi-line description; on a single-line task a leading token works
+too. Category and ord are changed from the main `task` view or via
+args, not in the editor. The editor requires a real TTY; in scripts or piped
+contexts, pass field args (c:/ord:/est:/text) directly.
 
 Examples:
   task edit 3                       # open the text editor in this terminal
