@@ -1,10 +1,11 @@
 //! Built-in multi-line text editor for tasks.
 //!
 //! A small text area, pre-filled with the task's text. `Enter` inserts a newline so
-//! a task can carry a multi-line description; `Esc` (or `Ctrl+C`) finishes and saves
-//! — there is intentionally no discard key. Standard editor navigation and editing
-//! keys (word jumps and word delete) work as usual. Pasting is handled atomically
-//! via the terminal's bracketed-paste mode, so a long URL lands intact.
+//! a task can carry a multi-line description. `Esc` saves and leaves; `Ctrl+C`
+//! discards any changes and leaves (a brand-new task is simply not created).
+//! Standard editor navigation and editing keys (word jumps and word delete) work as
+//! usual. Pasting is handled atomically via the terminal's bracketed-paste mode, so
+//! a long URL lands intact.
 //!
 //! A duration token at the *end* of the text (e.g. `Buy milk 45m`) is pulled out into
 //! the estimate on save — this works for multi-line descriptions too, where only a
@@ -96,18 +97,21 @@ impl State {
 
 pub enum Action {
     Continue,
-    /// Leave the editor. The run-loop saves the committed task if it's non-empty; an
-    /// empty buffer simply exits without saving (there is nothing to discard).
-    Exit,
+    /// Save and leave (Esc). The run-loop commits the typed task if it's non-empty; an
+    /// empty buffer just exits without saving (a brand-new task is not created).
+    Save,
+    /// Discard and leave (Ctrl+C). The run-loop returns without saving, so the task is
+    /// left exactly as it was — and a brand-new task is not created.
+    Cancel,
 }
 
 pub fn handle_key(state: &mut State, key: KeyEvent) -> Action {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     let alt = key.modifiers.contains(KeyModifiers::ALT);
     match key.code {
-        // Esc / Ctrl+C save and leave — there is intentionally no discard key.
-        KeyCode::Esc => return Action::Exit,
-        KeyCode::Char('c') if ctrl => return Action::Exit,
+        // Esc saves and leaves; Ctrl+C discards and leaves.
+        KeyCode::Esc => return Action::Save,
+        KeyCode::Char('c') if ctrl => return Action::Cancel,
         // Enter inserts a newline; Esc is how you finish.
         KeyCode::Enter => insert_char(&mut state.input, &mut state.cursor, '\n'),
         KeyCode::Char(c) if !ctrl => insert_char(&mut state.input, &mut state.cursor, c),
@@ -412,7 +416,7 @@ fn draw(frame: &mut Frame, state: &State) {
 
     frame.render_widget(
         Paragraph::new(Span::styled(
-            " Esc save · Enter newline · a trailing duration (e.g. 45m) sets the estimate ",
+            " Esc save · Ctrl+C discard · Enter newline · a trailing duration (e.g. 45m) sets the estimate ",
             Style::default().fg(Color::DarkGray),
         )),
         chunks[2],
@@ -461,7 +465,7 @@ fn run_loop(
         match event::read().map_err(Error::Io)? {
             Event::Key(k) if k.kind == KeyEventKind::Press => match handle_key(&mut state, k) {
                 Action::Continue => {}
-                Action::Exit => match state.commit(&baseline) {
+                Action::Save => match state.commit(&baseline) {
                     Ok(updated) => {
                         save(updated)?;
                         return Ok(());
@@ -470,6 +474,8 @@ fn run_loop(
                     // was (a brand-new task is simply not created).
                     Err(_) => return Ok(()),
                 },
+                // Discard: leave without committing, so no save happens at all.
+                Action::Cancel => return Ok(()),
             },
             // A whole pasted payload (bracketed paste) lands at the cursor at once.
             Event::Paste(data) => insert_str(&mut state.input, &mut state.cursor, &data),
@@ -530,20 +536,20 @@ mod tests {
     }
 
     #[test]
-    fn esc_exits() {
+    fn esc_saves() {
         let mut state = State::from_task(&make_task());
         assert!(matches!(
             handle_key(&mut state, key(KeyCode::Esc)),
-            Action::Exit
+            Action::Save
         ));
     }
 
     #[test]
-    fn ctrl_c_exits() {
+    fn ctrl_c_cancels() {
         let mut state = State::from_task(&make_task());
         assert!(matches!(
             handle_key(&mut state, ctrl(KeyCode::Char('c'))),
-            Action::Exit
+            Action::Cancel
         ));
     }
 

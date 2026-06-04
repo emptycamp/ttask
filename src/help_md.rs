@@ -189,7 +189,8 @@ const ADD: &str = "\
 # task add
 
 Add a new task. With no arguments, opens the built-in text editor in the terminal
-(the same form as the `a` key in the `task` view); type the text and `Esc` to save.
+(the same form as the `a` key in the `task` view); type the text and `Esc` to save,
+or `Ctrl+C` to discard.
 
 ## Usage
 
@@ -273,8 +274,8 @@ Edit an existing task.
 
 With no field args, opens the built-in text editor inside the terminal — an
 interactive TUI that blocks on input. `Enter` inserts a newline (tasks may carry a
-multi-line description); `Esc` (or `Ctrl+C`) saves and exits — there is no discard
-key. A duration token at the end of the text (e.g. `Buy milk 45m`) sets the
+multi-line description); `Esc` saves and exits, while `Ctrl+C` discards any
+changes. A duration token at the end of the text (e.g. `Buy milk 45m`) sets the
 estimate, including on a multi-line description; on a single-line task a leading
 token works too. Category and ord are not editable from the editor.
 
