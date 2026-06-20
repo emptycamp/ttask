@@ -25,7 +25,7 @@ impl Drop for StoreScope {
 #[macro_export]
 macro_rules! task_cmd {
     ($scope:expr) => {{
-        let mut cmd = assert_cmd::Command::cargo_bin("task").unwrap();
+        let mut cmd = assert_cmd::Command::cargo_bin("ttask").unwrap();
         cmd.env("TASK_DATA_DIR", &$scope.path);
         cmd
     }};

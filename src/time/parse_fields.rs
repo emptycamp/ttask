@@ -1,5 +1,5 @@
-//! Shared parser for the `c:` / `ord:` / `est:` inline fields used by both `task add`
-//! and `task edit`. The `c:` prefix is the category (A/B/C); we also accept `p:`
+//! Shared parser for the `c:` / `ord:` / `est:` inline fields used by both `ttask add`
+//! and `ttask edit`. The `c:` prefix is the category (A/B/C); we also accept `p:`
 //! as a legacy alias so muscle memory keeps working after the rename.
 
 use crate::error::{Error, Result};
@@ -133,7 +133,7 @@ pub fn parse_task_fields(args: &[String]) -> Result<ParsedFields> {
 ///
 /// A token only counts when it contains both a digit and a unit letter, so
 /// `30m` / `4.5h` match but a bare number (`5`) or a plain word (`milk`) stay in
-/// the text. A trailing token wins over a leading one. Used by both `task add`
+/// the text. A trailing token wins over a leading one. Used by both `ttask add`
 /// and the edit TUI so the shorthand behaves identically in both.
 pub fn split_estimate(text: &str) -> (String, Option<i64>) {
     let trimmed = text.trim();

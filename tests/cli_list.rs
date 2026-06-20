@@ -6,7 +6,7 @@ use predicates::str::contains;
 use support::StoreScope;
 
 fn task(scope: &StoreScope) -> Command {
-    let mut cmd = Command::cargo_bin("task").unwrap();
+    let mut cmd = Command::cargo_bin("ttask").unwrap();
     cmd.env("TASK_DATA_DIR", &scope.path);
     cmd
 }
@@ -182,7 +182,7 @@ fn list_human_view_is_ultra_mini_no_header_no_ord() {
 
 #[test]
 fn list_has_no_ab_estimate_footer() {
-    // The A+B estimate / finish-time summary is TUI-only; `task ls` must not show it.
+    // The A+B estimate / finish-time summary is TUI-only; `ttask ls` must not show it.
     let scope = StoreScope::new();
     task(&scope)
         .args(["add", "Plan", "c:a", "est:1h"])
@@ -270,7 +270,7 @@ fn list_format_md_empty_uses_no_tasks_italic() {
 
 #[test]
 fn list_with_id_shows_task_details() {
-    // `task ls <id>` is a shortcut for `task show <id>` / `task info <id>`.
+    // `ttask ls <id>` is a shortcut for `ttask show <id>` / `ttask info <id>`.
     let scope = StoreScope::new();
     task(&scope)
         .args(["add", "Buy milk", "c:a"])
@@ -310,7 +310,7 @@ fn list_shows_first_line_only_but_show_keeps_full_text() {
         .assert()
         .success();
 
-    // `task ls` shows only the first line with an ellipsis — multi-line text is not
+    // `ttask ls` shows only the first line with an ellipsis — multi-line text is not
     // flattened into one run-on row.
     task(&scope)
         .args(["list"])
@@ -319,7 +319,7 @@ fn list_shows_first_line_only_but_show_keeps_full_text() {
         .stdout(contains("line one…"))
         .stdout(predicates::str::contains("line two").not());
 
-    // `task show` keeps the line break in the details view.
+    // `ttask show` keeps the line break in the details view.
     let out = task(&scope).args(["show", "1"]).output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(

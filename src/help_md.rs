@@ -84,7 +84,7 @@ pub fn render(path: &[String]) -> String {
         ["history"] => HISTORY.to_string(),
         ["history", "list"] => HISTORY_LIST.to_string(),
         _ => format!(
-            "# task {}\n\n_No markdown help for this subcommand. Run `task {} --help` for the plain version._\n",
+            "# ttask {}\n\n_No markdown help for this subcommand. Run `ttask {} --help` for the plain version._\n",
             path.join(" "),
             path.join(" "),
         ),
@@ -92,7 +92,7 @@ pub fn render(path: &[String]) -> String {
 }
 
 const ROOT: &str = "\
-# task
+# ttask
 
 Personal task manager.
 
@@ -101,22 +101,22 @@ Personal task manager.
 **Never invoke any of the interactive TUI surfaces.** They block on user input
 forever and will hang your script / tool call. Specifically:
 
-- `task` with **no command** — opens the main TUI. Don't.
-- `task edit <ID>` with **no field args** — opens the form editor. Always pass
-  fields (`task edit 3 c:a`, `task edit 3 ord:1`, etc.).
-- `task history` with **no subcommand** — opens the history picker. Use
-  `task history list` instead (and add `--format md` to get a table).
-- `task clear` without `-y` — opens a confirmation prompt. Pass `-y` to skip.
-- `task open <ID>` when the task has **several links** — opens a picker. Pass the
-  link number (`task open 3 2`) to avoid it.
+- `ttask` with **no command** — opens the main TUI. Don't.
+- `ttask edit <ID>` with **no field args** — opens the form editor. Always pass
+  fields (`ttask edit 3 c:a`, `ttask edit 3 ord:1`, etc.).
+- `ttask history` with **no subcommand** — opens the history picker. Use
+  `ttask history list` instead (and add `--format md` to get a table).
+- `ttask clear` without `-y` — opens a confirmation prompt. Pass `-y` to skip.
+- `ttask open <ID>` when the task has **several links** — opens a picker. Pass the
+  link number (`ttask open 3 2`) to avoid it.
 
 For machine-readable output, append `--format md` to any non-interactive
-subcommand (`task list --format md`, `task info 3 --format md`,
-`task history list --format md`, etc.).
+subcommand (`ttask list --format md`, `ttask info 3 --format md`,
+`ttask history list --format md`, etc.).
 
 ## Usage
 
-`task [OPTIONS] [COMMAND]`
+`ttask [OPTIONS] [COMMAND]`
 
 If no command is given, the interactive TUI opens.
 
@@ -134,7 +134,7 @@ If no command is given, the interactive TUI opens.
 
 ## TUI keys
 
-Run `task` with no command to open the interactive list. Then:
+Run `ttask` with no command to open the interactive list. Then:
 
 - `↑` / `↓` — move cursor between tasks
 - `1`..`9` — move the cursor task to that 1-based position within its category
@@ -146,7 +146,7 @@ Run `task` with no command to open the interactive list. Then:
 - `c` / `d` — complete / delete the cursor task (applied immediately)
 - `Shift+A` / `Shift+B` / `Shift+C` — set category on the cursor task (immediate)
 - `u` / `r` — undo / redo the last change made this session. Undo/redo history is
-  cleared when you quit; after that, roll back via `task history`.
+  cleared when you quit; after that, roll back via `ttask history`.
 - `Esc` — clear an active search filter on the first press; quit on the next.
   `Ctrl+C` quits unconditionally.
 
@@ -180,34 +180,34 @@ category, ord, or est — resets its clock.
 - **Category C** — auto-deleted after **2 working days** without any update.
 - **Completed** — hard-removed **1 work week** after completion.
 - **Soft-deleted** — hard-removed **1 work week** after deletion. (Until then
-  the task is recoverable via `task history`.)
+  the task is recoverable via `ttask history`.)
 
-Run `task <COMMAND> --help --format md` for command-specific markdown help.
+Run `ttask <COMMAND> --help --format md` for command-specific markdown help.
 ";
 
 const ADD: &str = "\
-# task add
+# ttask add
 
 Add a new task. With no arguments, opens the built-in text editor in the terminal
-(the same form as the `a` key in the `task` view); type the text and `Esc` to save.
+(the same form as the `a` key in the `ttask` view); type the text and `Esc` to save.
 
 ## Usage
 
-`task add [ARGS]...`
+`ttask add [ARGS]...`
 
 ## ⚠ Notice for LLM agents
 
-**Always pass the task text as args.** Calling `task add` with no arguments opens
+**Always pass the task text as args.** Calling `ttask add` with no arguments opens
 the interactive editor and will hang your tool call (it needs a TTY). Pass the text
-directly instead — `task add Buy milk`, optionally with `c:` / `ord:` / `est:`
+directly instead — `ttask add Buy milk`, optionally with `c:` / `ord:` / `est:`
 fields and a trailing/leading duration.
 
 ## Examples
 
-- `task add Buy milk`
-- `task add Read book c:a est:1h`
-- `task add Plan sprint c:b est:2h ord:1`
-- `task add \"Quick chore\" c:c`
+- `ttask add Buy milk`
+- `ttask add Read book c:a est:1h`
+- `ttask add Plan sprint c:b est:2h ord:1`
+- `ttask add \"Quick chore\" c:c`
 
 ## Fields
 
@@ -228,17 +228,17 @@ Editing the task (text, category, ord, est) resets the clock.
 ";
 
 const LIST: &str = "\
-# task list
+# ttask list
 
 List tasks. By default shows only active tasks, grouped by category (A, then B,
 then C) and ordered within each category by its manual order.
 
-Given a task ID, shows that single task's full details instead — `task list 3` is a
-shortcut for `task info 3`.
+Given a task ID, shows that single task's full details instead — `ttask list 3` is a
+shortcut for `ttask info 3`.
 
 ## Usage
 
-`task list [ID] [OPTIONS]`
+`ttask list [ID] [OPTIONS]`
 
 ## Options
 
@@ -249,27 +249,27 @@ shortcut for `task info 3`.
 
 ## Examples
 
-- `task list` — active tasks, grouped by category
-- `task list 3` — full details for task #3 (like `task info 3`)
-- `task list --completed` — completed tasks
-- `task list --all` — everything
+- `ttask list` — active tasks, grouped by category
+- `ttask list 3` — full details for task #3 (like `ttask info 3`)
+- `ttask list --completed` — completed tasks
+- `ttask list --all` — everything
 
 The human view is ultra-compact (`1 A Buy milk · 30m`, no Ord column). The
 combined A+B estimate and projected finish time are shown only in the interactive
-`task` view, not in `task list`.
+`ttask` view, not in `ttask list`.
 
 In markdown mode tasks come back as a single table with `ID`, `Cat`, `Status`,
 `Ord`, `Description`, and `Est` columns.
 ";
 
 const EDIT: &str = "\
-# task edit
+# ttask edit
 
 Edit an existing task.
 
 ## Usage
 
-`task edit ID [ARGS]...`
+`ttask edit ID [ARGS]...`
 
 With no field args, opens the built-in text editor inside the terminal — an
 interactive TUI that blocks on input. `Enter` inserts a newline (tasks may carry a
@@ -280,54 +280,54 @@ token works too. Category and ord are not editable from the editor.
 
 ## ⚠ Notice for LLM agents
 
-**Always pass at least one field arg.** Calling `task edit 3` with no fields
+**Always pass at least one field arg.** Calling `ttask edit 3` with no fields
 opens the interactive editor and will hang your tool call. Use the inline field
-syntax instead — `task edit 3 c:a`, `task edit 3 ord:1 est:30m`, or
-`task edit 3 New text here` (anything not prefixed with `c:` / `ord:` /
+syntax instead — `ttask edit 3 c:a`, `ttask edit 3 ord:1 est:30m`, or
+`ttask edit 3 New text here` (anything not prefixed with `c:` / `ord:` /
 `est:` is treated as the new task text, and a trailing/leading duration sets the
 estimate).
 
 ## Examples
 
-- `task edit 3 c:a` — set category via args
-- `task edit 3 New text` — change text via args
-- `task edit 3 New text 45m` — change text and set estimate (bare token)
-- `task edit 3 ord:1 est:30m` — move to first position and update estimate
+- `ttask edit 3 c:a` — set category via args
+- `ttask edit 3 New text` — change text via args
+- `ttask edit 3 New text 45m` — change text and set estimate (bare token)
+- `ttask edit 3 ord:1 est:30m` — move to first position and update estimate
 
 In markdown mode the edited task is re-rendered as a full info card after the change.
 ";
 
 const DELETE: &str = "\
-# task delete
+# ttask delete
 
-Delete a task. The task is soft-deleted and can be restored from `task history`.
+Delete a task. The task is soft-deleted and can be restored from `ttask history`.
 
 ## Usage
 
-`task delete ID`
+`ttask delete ID`
 
 ## Example
 
-- `task delete 3`
+- `ttask delete 3`
 
 ## Retention
 
 After soft-delete, the task is hard-removed automatically **1 work week**
-(5 working days) later. Until then it can be restored via `task history`.
+(5 working days) later. Until then it can be restored via `ttask history`.
 ";
 
 const COMPLETE: &str = "\
-# task complete
+# ttask complete
 
 Mark a task as completed.
 
 ## Usage
 
-`task complete ID`
+`ttask complete ID`
 
 ## Example
 
-- `task complete 3`
+- `ttask complete 3`
 
 ## Retention
 
@@ -336,30 +336,30 @@ days) after completion.
 ";
 
 const INFO: &str = "\
-# task info
+# ttask info
 
 Show full task details (text, category, ord, est, status, timestamps).
 
 ## Usage
 
-`task info ID`
+`ttask info ID`
 
 ## Example
 
-- `task info 3`
+- `ttask info 3`
 
 In markdown mode the output is a heading plus a bulleted list of fields.
 ";
 
 const OPEN: &str = "\
-# task open
+# ttask open
 
 Open a link contained in a task's text using the system's default handler
 (the default browser on Windows, `open` on macOS, `xdg-open` on Linux).
 
 ## Usage
 
-`task open ID [INDEX]`
+`ttask open ID [INDEX]`
 
 The task text is scanned for URLs (`http://`, `https://`, or a leading `www.`):
 
@@ -370,30 +370,30 @@ The task text is scanned for URLs (`http://`, `https://`, or a leading `www.`):
 
 ## ⚠ Notice for LLM agents
 
-With several links and no `INDEX`, `task open` opens an interactive picker that
-blocks. **Always pass the link number** (`task open 3 2`). In a non-interactive
+With several links and no `INDEX`, `ttask open` opens an interactive picker that
+blocks. **Always pass the link number** (`ttask open 3 2`). In a non-interactive
 context the command instead errors and lists the numbered links, so you can re-run
-with the right index. `task open <ID> 1` opens the first link non-interactively.
+with the right index. `ttask open <ID> 1` opens the first link non-interactively.
 
 ## Examples
 
-- `task open 3` — open the only link in task #3 (or pick one if there are several)
-- `task open 3 2` — open the 2nd link in task #3 (no picker)
+- `ttask open 3` — open the only link in task #3 (or pick one if there are several)
+- `ttask open 3 2` — open the 2nd link in task #3 (no picker)
 ";
 
 const CLEAR: &str = "\
-# task clear
+# ttask clear
 
 Wipe the entire database — every task and every history event. This cannot be
 undone. By default you get a confirmation prompt; pass `-y` / `-f` to skip it.
 
 ## Usage
 
-`task clear [OPTIONS]`
+`ttask clear [OPTIONS]`
 
 ## ⚠ Notice for LLM agents
 
-`task clear` without `-y` opens a confirmation prompt and will hang. Either
+`ttask clear` without `-y` opens a confirmation prompt and will hang. Either
 pass `-y`/`-f` to confirm, or — better — don't call `clear` from an automated
 flow at all (this is a destructive, irreversible operation).
 
@@ -403,30 +403,30 @@ flow at all (this is a destructive, irreversible operation).
 
 ## Examples
 
-- `task clear` — confirm, then wipe
-- `task clear -y` — no prompt
-- `task clear --force` — equivalent to `-y`
+- `ttask clear` — confirm, then wipe
+- `ttask clear -y` — no prompt
+- `ttask clear --force` — equivalent to `-y`
 ";
 
 const HISTORY: &str = "\
-# task history
+# ttask history
 
 Show recent change history, or revert a specific event by ID.
 
 ## Usage
 
-`task history [SUBCOMMAND] [OPTIONS]`
+`ttask history [SUBCOMMAND] [OPTIONS]`
 
-Running `task history` with no subcommand opens an interactive picker so you can
-choose which event to undo. Use `task history list` to dump events to stdout.
+Running `ttask history` with no subcommand opens an interactive picker so you can
+choose which event to undo. Use `ttask history list` to dump events to stdout.
 
 The last 30 events are kept. Each event has a stable ID you can revert.
 
 ## ⚠ Notice for LLM agents
 
-**Don't call `task history` with no subcommand** — that opens the interactive
-picker and will block. Use `task history list` (optionally with `--format md`)
-to read events, and `task history --revert <ID> -y` to undo a specific one
+**Don't call `ttask history` with no subcommand** — that opens the interactive
+picker and will block. Use `ttask history list` (optionally with `--format md`)
+to read events, and `ttask history --revert <ID> -y` to undo a specific one
 without the confirmation prompt.
 
 ## Subcommands
@@ -440,23 +440,23 @@ without the confirmation prompt.
 
 ## Examples
 
-- `task history` — interactive picker
-- `task history list` — plain stdout list (minimal)
-- `task history list -v` — include old→new diffs for edits
-- `task history --revert 12` — revert event #12 (with confirmation)
-- `task history --revert 12 -y` — skip confirmation
+- `ttask history` — interactive picker
+- `ttask history list` — plain stdout list (minimal)
+- `ttask history list -v` — include old→new diffs for edits
+- `ttask history --revert 12` — revert event #12 (with confirmation)
+- `ttask history --revert 12 -y` — skip confirmation
 ";
 
 const HISTORY_LIST: &str = "\
-# task history list
+# ttask history list
 
-Print history events to stdout. This is the non-interactive form of `task history`
+Print history events to stdout. This is the non-interactive form of `ttask history`
 — it never opens the picker, so it's safe in scripts, pipes, and `--format md`
 contexts.
 
 ## Usage
 
-`task history list [-v]`
+`ttask history list [-v]`
 
 ## Options
 
@@ -537,7 +537,7 @@ mod tests {
     #[test]
     fn render_root_includes_global_format_option() {
         let out = render(&[]);
-        assert!(out.starts_with("# task"));
+        assert!(out.starts_with("# ttask"));
         assert!(out.contains("--format md"));
         assert!(out.contains("## Commands"));
     }
@@ -545,7 +545,7 @@ mod tests {
     #[test]
     fn render_add_includes_field_syntax() {
         let out = render(&["add".into()]);
-        assert!(out.starts_with("# task add"));
+        assert!(out.starts_with("# ttask add"));
         assert!(out.contains("c:a"));
         assert!(out.contains("ord:"));
         assert!(out.contains("est:"));
@@ -555,7 +555,7 @@ mod tests {
     #[test]
     fn render_history_list_describes_subcommand() {
         let out = render(&["history".into(), "list".into()]);
-        assert!(out.starts_with("# task history list"));
+        assert!(out.starts_with("# ttask history list"));
         assert!(out.contains("table"));
     }
 
@@ -569,7 +569,7 @@ mod tests {
     #[test]
     fn render_open_describes_links_and_picker() {
         let out = render(&["open".into()]);
-        assert!(out.starts_with("# task open"));
+        assert!(out.starts_with("# ttask open"));
         assert!(out.contains("picker"));
         assert!(out.contains("link number"));
     }

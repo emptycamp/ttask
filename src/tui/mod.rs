@@ -15,7 +15,7 @@ use std::io;
 use std::time::{Duration as StdDuration, Instant};
 
 const EVENT_POLL_MS: u64 = 100;
-/// How often to re-read the store so external `task add/edit/delete/complete`
+/// How often to re-read the store so external `ttask add/edit/delete/complete`
 /// invocations show up live in the open TUI. 500 ms balances "feels live" with
 /// "don't spam the store with read txns".
 const EXTERNAL_REFRESH_MS: u64 = 500;
@@ -80,8 +80,8 @@ impl App {
 /// In-session undo/redo of immediate store mutations. Each entry is a full store
 /// snapshot taken just *before* a mutation; undo restores the previous snapshot
 /// (capturing the current state for redo). Both stacks are dropped when the TUI
-/// exits, so once the user reopens `task` the only way to roll back further is
-/// `task history`.
+/// exits, so once the user reopens `ttask` the only way to roll back further is
+/// `ttask history`.
 struct UndoStacks {
     undo: Vec<StoreSnapshot>,
     redo: Vec<StoreSnapshot>,
@@ -352,7 +352,7 @@ fn edit_existing(
 
 /// Returns the id of the created task, or `None` if the editor was cancelled
 /// before anything was saved (so the caller can move the cursor onto it). Shares the
-/// form path with `task add` (no args) via `commands::add::run_form`.
+/// form path with `ttask add` (no args) via `commands::add::run_form`.
 fn add_new(
     store: &mut Store,
     clock: &dyn Clock,

@@ -1,15 +1,15 @@
 [package]
-name = "task"
+name = "ttask"
 version = "0.1.0"
 edition = "2021"
-default-run = "task"
+default-run = "ttask"
 
 [[bin]]
-name = "task"
+name = "ttask"
 path = "src/main.rs"
 
 [lib]
-name = "task"
+name = "ttask"
 path = "src/lib.rs"
 
 [dependencies]

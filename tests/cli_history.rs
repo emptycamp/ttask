@@ -6,7 +6,7 @@ use predicates::str::contains;
 use support::StoreScope;
 
 fn task(scope: &StoreScope) -> Command {
-    let mut cmd = Command::cargo_bin("task").unwrap();
+    let mut cmd = Command::cargo_bin("ttask").unwrap();
     cmd.env("TASK_DATA_DIR", &scope.path);
     cmd
 }
@@ -342,7 +342,7 @@ fn history_format_md_outputs_markdown_table() {
 
 #[test]
 fn list_format_md_with_add_outputs_info_card() {
-    // `task add --format md` should render the full new task as a markdown info card.
+    // `ttask add --format md` should render the full new task as a markdown info card.
     let scope = StoreScope::new();
     task(&scope)
         .args(["--format", "md", "add", "Hello"])

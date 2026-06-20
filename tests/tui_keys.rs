@@ -1,8 +1,8 @@
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use task::model::{Category, Status, Task};
-use task::tui::events::{handle, Action};
-use task::tui::App;
+use ttask::model::{Category, Status, Task};
+use ttask::tui::events::{handle, Action};
+use ttask::tui::App;
 
 fn make_task(id: u32) -> Task {
     let now = Utc::now();

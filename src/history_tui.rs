@@ -1,6 +1,6 @@
-//! Interactive picker for `task history`.
+//! Interactive picker for `ttask history`.
 //!
-//! Behaves like `task` view's pending-change model:
+//! Behaves like `ttask` view's pending-change model:
 //! - `u` or Enter toggles a "mark for undo" anchor on the selected event.
 //! - Marks live per-task: anchoring on a task #1 event marks task #1's cascade; you
 //!   can independently anchor on a task #2 event to add task #2's cascade. Marking
@@ -8,7 +8,7 @@
 //! - Within each task, marking an event also marks every newer event on the same
 //!   task. The marked events are shown struck-through in red.
 //! - Esc / Ctrl+C exits and applies all marks (newest first across the union).
-//!   `q` does nothing, matching `task` view's keymap.
+//!   `q` does nothing, matching `ttask` view's keymap.
 
 use crate::error::{Error, Result};
 use crate::format::format_relative_past;
@@ -152,7 +152,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
         };
 
         match (key.code, key.modifiers) {
-            // Quit keys match `task` view exactly. `q` deliberately does nothing.
+            // Quit keys match `ttask` view exactly. `q` deliberately does nothing.
             (KeyCode::Esc, _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                 return Ok(());
             }

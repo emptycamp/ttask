@@ -1,5 +1,5 @@
 //! Reference-counted terminal screen setup, shared by every full-screen UI in the
-//! app (the main `task` view, the task editor, and the link picker).
+//! app (the main `ttask` view, the task editor, and the link picker).
 //!
 //! Each of those used to enter and leave the alternate screen on its own. That is
 //! fine when only one is on screen, but when one opens another — pressing `e`/`o` in

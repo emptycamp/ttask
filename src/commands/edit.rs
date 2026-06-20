@@ -105,11 +105,11 @@ fn ensure_editable(task: &crate::model::Task) -> Result<()> {
     match task.status {
         Status::Active => Ok(()),
         Status::Completed => Err(Error::Parse(format!(
-            "task #{} is completed; revert the completion via `task history` before editing",
+            "task #{} is completed; revert the completion via `ttask history` before editing",
             task.id
         ))),
         Status::SoftDeleted => Err(Error::Parse(format!(
-            "task #{} is deleted; revert the deletion via `task history` before editing",
+            "task #{} is deleted; revert the deletion via `ttask history` before editing",
             task.id
         ))),
     }

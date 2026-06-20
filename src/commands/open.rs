@@ -1,6 +1,6 @@
-//! `task open <id>` — find link(s) in a task's text and open one with the system's
+//! `ttask open <id>` — find link(s) in a task's text and open one with the system's
 //! default handler. With several links, an interactive picker chooses; passing a
-//! 1-based index (`task open <id> 2`) skips the picker, which keeps the command
+//! 1-based index (`ttask open <id> 2`) skips the picker, which keeps the command
 //! usable from scripts and non-interactive contexts.
 
 use crate::commands::Tty;
@@ -83,7 +83,7 @@ fn select_link(links: &[String], index: Option<usize>, is_tty: bool) -> Selectio
 
 fn ambiguous_message(id: TaskId, links: &[String]) -> String {
     let mut msg = format!(
-        "task #{id} has {} links; pass the link number (e.g. `task open {id} 1`):",
+        "task #{id} has {} links; pass the link number (e.g. `ttask open {id} 1`):",
         links.len(),
     );
     for (i, l) in links.iter().enumerate() {

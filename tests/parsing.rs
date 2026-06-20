@@ -1,5 +1,5 @@
 use chrono::Duration;
-use task::time::parse_duration;
+use ttask::time::parse_duration;
 
 #[test]
 fn duration_10min_roundtrip() {

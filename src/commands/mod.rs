@@ -56,7 +56,7 @@ pub fn dispatch(
             tui::run(store, clock, editor)?;
         }
         Some(Cmd::Add { args }) => {
-            // No args opens the built-in editor (same as `a` in the `task` view);
+            // No args opens the built-in editor (same as `a` in the `ttask` view);
             // a cancelled editor creates nothing, so there's nothing to report.
             let created = if args.is_empty() {
                 add::run_form(store, clock, editor)?
@@ -78,7 +78,7 @@ pub fn dispatch(
         Some(Cmd::List {
             id: Some(task_id), ..
         }) => {
-            // `task list <id>` / `task ls <id>` is a shortcut for `task info <id>`.
+            // `ttask list <id>` / `ttask ls <id>` is a shortcut for `ttask info <id>`.
             let output = info::run(*task_id, store, &opts)?;
             print!("{output}");
         }
