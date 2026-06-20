@@ -1,11 +1,11 @@
 use clap::Parser;
-use task::cli::Cli;
-use task::clock::SystemClock;
-use task::commands::{dispatch, SystemTty};
-use task::confirm::StdinPrompt;
-use task::editor::BuiltinEditor;
-use task::help_md;
-use task::store::Store;
+use ttask::cli::Cli;
+use ttask::clock::SystemClock;
+use ttask::commands::{dispatch, SystemTty};
+use ttask::confirm::StdinPrompt;
+use ttask::editor::BuiltinEditor;
+use ttask::help_md;
+use ttask::store::Store;
 
 fn main() {
     let raw_args: Vec<String> = std::env::args().collect();

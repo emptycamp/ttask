@@ -73,7 +73,7 @@ pub fn run(args: &[String], store: &mut Store, clock: &dyn Clock) -> Result<Task
 
 /// Add a new task through the built-in form editor (no field args). Returns the
 /// created task, or `None` if the editor was cancelled before anything was saved.
-/// This is what `task add` (with no args) and the `a` key in the `task` view both
+/// This is what `ttask add` (with no args) and the `a` key in the `ttask` view both
 /// use, so the new task lands as a revertable history event either way.
 pub fn run_form(
     store: &mut Store,

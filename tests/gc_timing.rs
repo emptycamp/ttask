@@ -1,9 +1,9 @@
 use chrono::{Duration, Local, TimeZone, Utc};
-use task::clock::FakeClock;
-use task::model::{Category, Status, Task};
-use task::store::gc::sweep;
-use task::store::Store;
 use tempfile::tempdir;
+use ttask::clock::FakeClock;
+use ttask::model::{Category, Status, Task};
+use ttask::store::gc::sweep;
+use ttask::store::Store;
 
 fn make_task(
     id: u32,

@@ -11,8 +11,8 @@
 //! the estimate on save — this works for multi-line descriptions too, where only a
 //! token at the very end counts. For single-line input a *leading* token (e.g.
 //! `4.5h plan sprint`) is also recognized. The remaining text is stored verbatim, so
-//! its newlines survive (they collapse to spaces only in the compact `task ls` view).
-//! Category and ord are not editable here — those are changed from the main `task`
+//! its newlines survive (they collapse to spaces only in the compact `ttask ls` view).
+//! Category and ord are not editable here — those are changed from the main `ttask`
 //! view.
 
 use crate::editor::Saver;
@@ -424,7 +424,7 @@ pub fn run(task: &Task, save: &mut Saver<'_>) -> Result<()> {
     use std::io::IsTerminal;
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err(Error::Parse(
-            "the editor requires a TTY; pass field args instead, e.g. `task add Buy milk 30m` or `task edit <id> c:a`".into(),
+            "the editor requires a TTY; pass field args instead, e.g. `ttask add Buy milk 30m` or `ttask edit <id> c:a`".into(),
         ));
     }
     // Share the alternate screen with a possibly-already-open main TUI so opening the

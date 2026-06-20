@@ -2,7 +2,7 @@ use crate::model::TaskId;
 use clap::{ArgGroup, Parser, Subcommand, ValueEnum};
 
 #[derive(Parser)]
-#[command(name = "task", about = "Personal task manager", version = env!("CARGO_PKG_VERSION"))]
+#[command(name = "ttask", about = "Personal task manager", version = env!("CARGO_PKG_VERSION"))]
 #[command(disable_help_subcommand = true)]
 pub struct Cli {
     #[arg(long, global = true, hide = true)]
@@ -26,15 +26,15 @@ pub enum Cmd {
     #[command(aliases = ["create", "new"])]
     #[command(long_about = "\
 Add a new task. With no arguments, opens the built-in editor (same as pressing `a`
-in the `task` view); type the task text and Esc to save.
+in the `ttask` view); type the task text and Esc to save.
 
 Examples:
-  task add                       # open the editor for a new task
-  task add Buy milk
-  task add Buy milk 30m
-  task add Read book c:a est:1h
-  task add Plan sprint c:b est:2h ord:1
-  task add \"Quick chore\" c:c
+  ttask add                       # open the editor for a new task
+  ttask add Buy milk
+  ttask add Buy milk 30m
+  ttask add Read book c:a est:1h
+  ttask add Plan sprint c:b est:2h ord:1
+  ttask add \"Quick chore\" c:c
 
 Fields you can set inline:
   c:a | c:b | c:c                category (A, B, or C; `p:` works as a legacy alias)
@@ -59,21 +59,21 @@ Editing the task (text, category, ord, est) resets the clock.
 List tasks. By default shows only active tasks, grouped by category (A, then B,
 then C) and ordered within each category by its manual order.
 
-Given a task ID, shows that single task's full details instead — `task list 3` is a
-shortcut for `task info 3`.
+Given a task ID, shows that single task's full details instead — `ttask list 3` is a
+shortcut for `ttask info 3`.
 
 Examples:
-  task list                       # active tasks (default)
-  task list 3                     # full details for task #3 (like `task info 3`)
-  task list --active              # active tasks (explicit)
-  task list -a                    # short for --active
-  task list --completed           # only completed
-  task list --deleted             # only soft-deleted
-  task list --all                 # everything (active + completed + deleted)
+  ttask list                       # active tasks (default)
+  ttask list 3                     # full details for task #3 (like `ttask info 3`)
+  ttask list --active              # active tasks (explicit)
+  ttask list -a                    # short for --active
+  ttask list --completed           # only completed
+  ttask list --deleted             # only soft-deleted
+  ttask list --all                 # everything (active + completed + deleted)
 ")]
     List {
         /// Show this task's full details instead of the list (a shortcut for
-        /// `task info <id>`). When omitted, the normal list is shown.
+        /// `ttask info <id>`). When omitted, the normal list is shown.
         id: Option<TaskId>,
         /// Show only active tasks (default).
         #[arg(short = 'a', long, aliases = ["activeonly", "open", "pending", "todo"])]
@@ -98,16 +98,16 @@ text area pre-filled with the task text. Enter inserts a newline (tasks may carr
 multi-line description); Esc saves and exits. A duration token at the end of the
 text (e.g. `Buy milk 45m`) sets the estimate,
 including on a multi-line description; on a single-line task a leading token works
-too. Category and ord are changed from the main `task` view or via
+too. Category and ord are changed from the main `ttask` view or via
 args, not in the editor. The editor requires a real TTY; in scripts or piped
 contexts, pass field args (c:/ord:/est:/text) directly.
 
 Examples:
-  task edit 3                       # open the text editor in this terminal
-  task edit 3 c:a                   # set category via args (scriptable)
-  task edit 3 New text              # change text via args
-  task edit 3 New text 45m          # change text and set estimate (bare token)
-  task edit 3 ord:1 est:30m         # move to first position and update estimate
+  ttask edit 3                       # open the text editor in this terminal
+  ttask edit 3 c:a                   # set category via args (scriptable)
+  ttask edit 3 New text              # change text via args
+  ttask edit 3 New text 45m          # change text and set estimate (bare token)
+  ttask edit 3 ord:1 est:30m         # move to first position and update estimate
 ")]
     Edit { id: TaskId, args: Vec<String> },
     /// Delete a task (soft delete; can be reverted via history).
@@ -119,7 +119,7 @@ Soft-deleted tasks are hard-removed automatically 1 work week (5 working days)
 after deletion.
 
 Examples:
-  task delete 3
+  ttask delete 3
 ")]
     Delete { id: TaskId },
     /// Mark a task as completed.
@@ -131,7 +131,7 @@ Completed tasks are hard-removed automatically 1 work week (5 working days)
 after completion.
 
 Examples:
-  task complete 3
+  ttask complete 3
 ")]
     Complete { id: TaskId },
     /// Show full task details.
@@ -140,7 +140,7 @@ Examples:
 Show full task details (text, category, ord, est, status, timestamps).
 
 Examples:
-  task info 3
+  ttask info 3
 ")]
     Info { id: TaskId },
     /// Open a link found in a task's text.
@@ -149,16 +149,16 @@ Examples:
 Open a link contained in a task's text using the system's default handler
 (the default browser on Windows, `open` on macOS, `xdg-open` on Linux).
 
-`task open <ID>` scans the task text for URLs (http://, https://, or a leading
+`ttask open <ID>` scans the task text for URLs (http://, https://, or a leading
 `www.`):
   no links           an error
   exactly one link   it is opened
   several links      a picker lets you choose one — or pass the link number
-                     directly to skip it: `task open <ID> 2`
+                     directly to skip it: `ttask open <ID> 2`
 
 Examples:
-  task open 3                     # open the only link in task #3 (or pick one)
-  task open 3 2                   # open the 2nd link in task #3 (no picker)
+  ttask open 3                     # open the only link in task #3 (or pick one)
+  ttask open 3 2                   # open the 2nd link in task #3 (no picker)
 ")]
     Open {
         /// Task to open a link from.
@@ -173,9 +173,9 @@ Wipe the entire database — every task and every history event. This cannot be
 undone. By default you get a confirmation prompt; pass -y / -f to skip it.
 
 Examples:
-  task clear                       # confirm, then wipe
-  task clear -y                    # no prompt
-  task clear --force               # equivalent to -y
+  ttask clear                       # confirm, then wipe
+  ttask clear -y                    # no prompt
+  ttask clear --force               # equivalent to -y
 ")]
     Clear {
         /// Skip the confirmation prompt.
@@ -187,20 +187,20 @@ Examples:
     #[command(long_about = "\
 Show recent change history, or revert a specific event by ID.
 
-Running `task history` with no subcommand opens an interactive picker so you can
-choose which event to undo. Use `task history list` to dump events to stdout
+Running `ttask history` with no subcommand opens an interactive picker so you can
+choose which event to undo. Use `ttask history list` to dump events to stdout
 instead. By default edits show only the names of changed fields; pass `-v` to
 include the full old→new diff.
 
 The last 30 events are kept. Each event has a stable ID you can revert.
 
 Examples:
-  task history                          # interactive picker (Enter to undo)
-  task history list                     # plain stdout list (minimal)
-  task history list -v                  # include old→new diffs for edits
-  task history --revert 12              # revert event #12 (with confirmation)
-  task history --revert 12 -y           # skip confirmation
-  task history --revert 12 --force      # equivalent to -y
+  ttask history                          # interactive picker (Enter to undo)
+  ttask history list                     # plain stdout list (minimal)
+  ttask history list -v                  # include old→new diffs for edits
+  ttask history --revert 12              # revert event #12 (with confirmation)
+  ttask history --revert 12 -y           # skip confirmation
+  ttask history --revert 12 --force      # equivalent to -y
 ")]
     History {
         #[command(subcommand)]

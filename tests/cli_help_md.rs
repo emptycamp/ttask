@@ -5,7 +5,7 @@ use predicates::str::contains;
 use support::StoreScope;
 
 fn task(scope: &StoreScope) -> Command {
-    let mut cmd = Command::cargo_bin("task").unwrap();
+    let mut cmd = Command::cargo_bin("ttask").unwrap();
     cmd.env("TASK_DATA_DIR", &scope.path);
     cmd
 }
@@ -17,7 +17,7 @@ fn help_with_format_md_emits_markdown_for_root() {
         .args(["--help", "--format", "md"])
         .assert()
         .success()
-        .stdout(contains("# task"))
+        .stdout(contains("# ttask"))
         .stdout(contains("## Commands"))
         .stdout(contains("--format md"));
 }
@@ -29,7 +29,7 @@ fn help_with_format_md_works_in_either_order() {
         .args(["--format", "md", "--help"])
         .assert()
         .success()
-        .stdout(contains("# task"));
+        .stdout(contains("# ttask"));
 }
 
 #[test]
@@ -39,7 +39,7 @@ fn help_with_short_h_flag_and_format_md_emits_markdown() {
         .args(["-h", "--format", "md"])
         .assert()
         .success()
-        .stdout(contains("# task"));
+        .stdout(contains("# ttask"));
 }
 
 #[test]
@@ -49,7 +49,7 @@ fn help_with_format_md_for_subcommand_routes_correctly() {
         .args(["list", "--help", "--format", "md"])
         .assert()
         .success()
-        .stdout(contains("# task list"))
+        .stdout(contains("# ttask list"))
         .stdout(contains("--completed"));
 }
 
@@ -60,7 +60,7 @@ fn help_with_format_md_for_history_list_subcommand_routes_correctly() {
         .args(["history", "list", "--help", "--format", "md"])
         .assert()
         .success()
-        .stdout(contains("# task history list"));
+        .stdout(contains("# ttask history list"));
 }
 
 #[test]
@@ -70,7 +70,7 @@ fn help_with_format_md_for_open_subcommand_routes_correctly() {
         .args(["open", "--help", "--format", "md"])
         .assert()
         .success()
-        .stdout(contains("# task open"))
+        .stdout(contains("# ttask open"))
         .stdout(contains("picker"));
 }
 
@@ -82,7 +82,7 @@ fn help_with_format_md_for_alias_normalizes_to_canonical_command() {
         .args(["ls", "--help", "--format", "md"])
         .assert()
         .success()
-        .stdout(contains("# task list"));
+        .stdout(contains("# ttask list"));
 }
 
 #[test]
@@ -98,7 +98,7 @@ fn plain_help_without_format_md_is_unchanged() {
 
 #[test]
 fn format_md_alone_does_not_trigger_help() {
-    // `task --format md` with no subcommand opens the TUI, which would error in a
+    // `ttask --format md` with no subcommand opens the TUI, which would error in a
     // non-tty test context. We just make sure the help text is NOT printed — the
     // markdown help should only show up when combined with `--help`.
     let scope = StoreScope::new();

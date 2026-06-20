@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 env:
-  BINARY_NAME: task.exe
+  BINARY_NAME: ttask.exe
 
 concurrency:
   group: release-${{ github.ref }}

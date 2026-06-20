@@ -17,7 +17,7 @@ pub enum Action {
     SetCategory(TaskId, Category),
     Complete(TaskId),
     Delete(TaskId),
-    /// Open a link from the task's text (same flow as `task open <id>`).
+    /// Open a link from the task's text (same flow as `ttask open <id>`).
     OpenLink(TaskId),
     Undo,
     Redo,

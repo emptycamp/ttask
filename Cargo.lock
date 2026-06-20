@@ -1410,25 +1410,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "task"
-version = "0.1.0"
-dependencies = [
- "assert_cmd",
- "bincode",
- "chrono",
- "clap",
- "crossterm",
- "directories",
- "heed",
- "insta",
- "predicates",
- "ratatui",
- "serde",
- "serde_yml",
- "tempfile",
-]
-
-[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1475,6 +1456,25 @@ checksum = "c8323304221c2a851516f22236c5722a72eaa19749016521d6dff0824447d96d"
 dependencies = [
  "displaydoc",
  "zerovec",
+]
+
+[[package]]
+name = "ttask"
+version = "0.1.0"
+dependencies = [
+ "assert_cmd",
+ "bincode",
+ "chrono",
+ "clap",
+ "crossterm",
+ "directories",
+ "heed",
+ "insta",
+ "predicates",
+ "ratatui",
+ "serde",
+ "serde_yml",
+ "tempfile",
 ]
 
 [[package]]

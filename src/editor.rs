@@ -9,7 +9,7 @@ use crate::yaml::from_yaml;
 pub type Saver<'a> = dyn FnMut(Task) -> Result<Task> + 'a;
 
 pub trait TaskEditor {
-    /// Open an interactive edit session for `task`. The editor may invoke `save` zero or
+    /// Open an interactive edit session for `ttask`. The editor may invoke `save` zero or
     /// more times during the session (`:w`, `:wq`, …). The function returns when the
     /// user requests to leave the editor; any persistence happened through `save`.
     fn edit(&self, task: &Task, save: &mut Saver<'_>) -> Result<()>;

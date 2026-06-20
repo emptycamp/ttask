@@ -63,7 +63,7 @@ pub fn format_list(tasks: &[Task], opts: &RenderOptions) -> String {
         out.push_str(&format_list_row(t, opts));
         out.push('\n');
     }
-    // The A+B estimate / finish-time summary is intentionally TUI-only — `task ls`
+    // The A+B estimate / finish-time summary is intentionally TUI-only — `ttask ls`
     // stays a clean, scannable list with no footer.
     out
 }
@@ -163,7 +163,7 @@ pub fn sanitize_for_terminal(s: &str) -> String {
     out
 }
 
-/// A one-line preview of a task's text for compact rows (`task ls`, the TUI list):
+/// A one-line preview of a task's text for compact rows (`ttask ls`, the TUI list):
 /// the first line only, sanitized, with a trailing `…` whenever something is hidden
 /// — either more lines below or a first line too long for `width`. Multi-line text is
 /// never flattened into one run-on line here.
@@ -224,7 +224,7 @@ pub fn format_info(task: &Task, opts: &RenderOptions) -> String {
     };
 
     // The details view keeps a multi-line description's line breaks (this is where
-    // you read the whole thing); the compact `task ls` view collapses them. Each line
+    // you read the whole thing); the compact `ttask ls` view collapses them. Each line
     // is still sanitized, and continuation lines are indented under the value.
     let text_block = indent_continuations(&task.text, INFO_LABEL_W);
     let mut out = format!(

@@ -6,7 +6,7 @@ use predicates::str::contains;
 use support::StoreScope;
 
 fn task(scope: &StoreScope) -> Command {
-    let mut cmd = Command::cargo_bin("task").unwrap();
+    let mut cmd = Command::cargo_bin("ttask").unwrap();
     cmd.env("TASK_DATA_DIR", &scope.path);
     // Never actually spawn a browser from the test suite.
     cmd.env("TASK_OPEN_DRY_RUN", "1");
